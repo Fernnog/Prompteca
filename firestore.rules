@@ -1,0 +1,9 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Cada usuário lê e grava apenas os próprios modelos.
+    match /users/{uid}/prompts/{promptId} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}
