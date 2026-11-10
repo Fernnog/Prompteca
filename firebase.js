@@ -22,13 +22,10 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 
-// Cache local: a lista abre na hora e continua funcionando sem internet.
-let db;
-try {
-  db = initializeFirestore(app, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
-} catch (e) {
-  db = initializeFirestore(app, {});
-}
+// Cache local persistente: funciona offline e sincroniza automaticamente entre abas.
+const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+});
 
 const promptsCol = uid => collection(db, "users", uid, "prompts");
 
@@ -37,16 +34,29 @@ export const login = (email, senha) => signInWithEmailAndPassword(auth, email.tr
 export const logout = () => signOut(auth);
 
 export function watchPrompts(uid, onData, onError) {
-  return onSnapshot(promptsCol(uid),
-    snap => onData(snap.docs.map(d => ({ id: d.id, ...d.data() })), snap.metadata),
-    onError);
+  return onSnapshot(
+    promptsCol(uid),
+    { includeMetadataChanges: true },
+    snap => onData(
+      snap.docs.map(d => ({
+        id: d.id,
+        ...d.data(),
+        pending: d.metadata.hasPendingWrites
+      })),
+      snap.metadata
+    ),
+    onError
+  );
 }
 
 export const newPromptId = uid => doc(promptsCol(uid)).id;
 
 export const savePrompt = (uid, m) =>
-  setDoc(doc(db, "users", uid, "prompts", m.id),
-    { name: m.name, body: m.body, updatedAt: serverTimestamp() });
+  setDoc(doc(db, "users", uid, "prompts", m.id), {
+    name: m.name,
+    body: m.body,
+    updatedAt: serverTimestamp()
+  });
 
 export const deletePrompt = (uid, id) => deleteDoc(doc(db, "users", uid, "prompts", id));
 
@@ -59,4 +69,21 @@ export function authMessage(err) {
   if (c === "auth/network-request-failed") return "Sem conexão. Verifique a internet.";
   if (c === "auth/user-disabled") return "Este usuário está desativado.";
   return "Não foi possível entrar. Tente de novo.";
+}
+
+export function saveMessage(err) {
+  const c = err?.code || "";
+  if (c === "permission-denied")
+    return "Permissão negada pelo Firestore. Confira as Regras de Segurança no Firebase.";
+  if (c === "not-found")
+    return "Banco Firestore não encontrado. Crie o banco (default) em modo Nativo.";
+  if (c === "unauthenticated")
+    return "Sessão expirada. Entre novamente para salvar.";
+  if (c === "invalid-argument")
+    return "Dados inválidos ou texto acima do limite permitido (250 mil caracteres).";
+  if (c === "resource-exhausted")
+    return "Limite de uso do Firebase atingido. Tente novamente mais tarde.";
+  if (c === "unavailable")
+    return "Servidor indisponível no momento. Verifique sua conexão.";
+  return "Erro ao salvar no Firebase (" + (c || "desconhecido") + ").";
 }
