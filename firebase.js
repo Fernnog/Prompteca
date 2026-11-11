@@ -6,7 +6,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  collection, doc, setDoc, deleteDoc, onSnapshot, serverTimestamp
+  collection, doc, setDoc, deleteDoc, writeBatch, onSnapshot, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -28,6 +28,7 @@ const db = initializeFirestore(app, {
 });
 
 const promptsCol = uid => collection(db, "users", uid, "prompts");
+const promptRef = (uid, id) => doc(db, "users", uid, "prompts", id);
 
 export const watchAuth = cb => onAuthStateChanged(auth, cb);
 export const login = (email, senha) => signInWithEmailAndPassword(auth, email.trim(), senha);
@@ -52,13 +53,41 @@ export function watchPrompts(uid, onData, onError) {
 export const newPromptId = uid => doc(promptsCol(uid)).id;
 
 export const savePrompt = (uid, m) =>
-  setDoc(doc(db, "users", uid, "prompts", m.id), {
+  setDoc(promptRef(uid, m.id), {
     name: m.name,
     body: m.body,
+    parentId: m.parentId ?? null,
     updatedAt: serverTimestamp()
-  });
+  }, { merge: true });
 
-export const deletePrompt = (uid, id) => deleteDoc(doc(db, "users", uid, "prompts", id));
+export function savePromptWithReparent(uid, m, childIdsToMove = []) {
+  const b = writeBatch(db);
+  b.set(promptRef(uid, m.id), {
+    name: m.name,
+    body: m.body,
+    parentId: m.parentId ?? null,
+    updatedAt: serverTimestamp()
+  }, { merge: true });
+  childIdsToMove.forEach(cid => {
+    b.set(promptRef(uid, cid), { parentId: m.parentId ?? null }, { merge: true });
+  });
+  return b.commit();
+}
+
+export const toggleFavPrompt = (uid, id, fav) =>
+  setDoc(promptRef(uid, id), { fav: !!fav }, { merge: true });
+
+export function deletePromptWithChildren(uid, id, childIds = []) {
+  if (!childIds.length) return deleteDoc(promptRef(uid, id));
+  const b = writeBatch(db);
+  childIds.forEach(cid => {
+    b.set(promptRef(uid, cid), { parentId: null }, { merge: true });
+  });
+  b.delete(promptRef(uid, id));
+  return b.commit();
+}
+
+export const deletePrompt = (uid, id) => deleteDoc(promptRef(uid, id));
 
 export function authMessage(err) {
   const c = err?.code || "";
@@ -74,7 +103,7 @@ export function authMessage(err) {
 export function saveMessage(err) {
   const c = err?.code || "";
   if (c === "permission-denied")
-    return "Permissão negada pelo Firestore. Confira as Regras de Segurança no Firebase.";
+    return "Permissão negada pelo Firestore. Confira se as Regras de Segurança permitem fav e parentId.";
   if (c === "not-found")
     return "Banco Firestore não encontrado. Crie o banco (default) em modo Nativo.";
   if (c === "unauthenticated")

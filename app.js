@@ -1,6 +1,8 @@
 import {
-  watchAuth, login, logout, watchPrompts, newPromptId, savePrompt, deletePrompt, authMessage, saveMessage
-} from "./firebase.js";
+  watchAuth, login, logout, watchPrompts, newPromptId,
+  savePrompt, savePromptWithReparent, toggleFavPrompt, deletePromptWithChildren,
+  authMessage, saveMessage
+} from "./firebase.js?v=2";
 
 const I = {
   plus:'<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
@@ -15,21 +17,87 @@ const I = {
   list:'<svg viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>',
   doc:'<svg viewBox="0 0 24 24"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h4"/></svg>',
   lock:'<svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
+  star:'<svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
+  branch:'<svg viewBox="0 0 24 24"><path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>',
+  sub:'<svg class="sub-ic" viewBox="0 0 24 24"><path d="M6 4v10a4 4 0 0 0 4 4h8"/><path d="m15 15 3 3-3 3"/></svg>',
+  expandPrompt:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 9l-3 3 3 3"/></svg>',
+  expandList:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M14 4v16M9 9l3 3-3 3"/></svg>'
 };
+
 const FIELD_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
 const $ = s => document.querySelector(s);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fieldsOf = body => { const out=[]; for (const m of body.matchAll(FIELD_RE)) if(!out.includes(m[1])) out.push(m[1]); return out; };
+const collator = new Intl.Collator('pt-BR', { numeric: true, sensitivity: 'base' });
+const norm = s => String(s || '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
 
 const state = {
-  user:null, authReady:false, models:[], current:null, mode:'empty',
-  values:{}, query:'', confirmId:null, loaded:false
+  user: null, authReady: false, models: [], current: null, mode: 'empty',
+  values: {}, query: '', confirmKey: null, loaded: false
 };
+
+const ui = {
+  override: null,     // null (automático) | 'list' | 'prompt' | 'collapsed'
+  peekOpenById: {},   // preserva abertura do <details> por modelo
+  searchFocused: false
+};
+
 let unsubPrompts = null;
 let draft = null;
 let savedRange = { s: 0, e: 0 };
+let searchTimer = null;
+let blurTimer = null;
 
-// Captura global para alças de seleção em dispositivos móveis (Android/iOS)
+/* ---------- Máquina de Estados de Layout ---------- */
+function computeLayout() {
+  if (state.mode === 'edit') {
+    return ui.override === 'collapsed' ? 'collapsed' : 'prompt';
+  }
+  if (ui.override) return ui.override;
+  if (ui.searchFocused || state.query.trim().length > 0) return 'list';
+  if (state.mode === 'use' && state.current && ui.peekOpenById[state.current]) return 'prompt';
+  return 'list';
+}
+
+function applyLayout() {
+  const layout = computeLayout();
+  const root = $('#appRoot');
+  const side = $('#side');
+  const toggleBtn = $('#toggleLayoutBtn');
+  if (!root || !side || !toggleBtn) return;
+
+  root.dataset.layout = layout;
+  const isCollapsed = layout === 'collapsed' && matchMedia('(min-width: 901px)').matches;
+  side.toggleAttribute('inert', isCollapsed);
+
+  const isWidePrompt = layout === 'prompt' || layout === 'collapsed';
+  toggleBtn.setAttribute('aria-pressed', String(isWidePrompt));
+  toggleBtn.innerHTML = isWidePrompt ? I.expandList : I.expandPrompt;
+
+  const label = layout === 'collapsed'
+    ? 'Reabrir barra lateral de modelos'
+    : (layout === 'prompt' ? 'Ampliar lista de modelos' : 'Ampliar área do prompt');
+  toggleBtn.setAttribute('aria-label', label);
+  toggleBtn.title = label;
+}
+
+$('#toggleLayoutBtn')?.addEventListener('click', () => {
+  const current = computeLayout();
+  if (current === 'collapsed') {
+    ui.override = state.mode === 'edit' ? 'prompt' : 'list';
+  } else if (current === 'list') {
+    ui.override = 'prompt';
+  } else {
+    ui.override = 'list';
+  }
+  applyLayout();
+});
+
+$('#collapseSideBtn')?.addEventListener('click', () => {
+  ui.override = 'collapsed';
+  applyLayout();
+});
+
 document.addEventListener('selectionchange', () => {
   if (state.mode !== 'edit') return;
   const ta = $('#ta');
@@ -65,7 +133,8 @@ $('#sair').addEventListener('click',async()=>{
 watchAuth(user=>{
   if(unsubPrompts){ unsubPrompts(); unsubPrompts=null; }
   state.user=user; state.authReady=true;
-  state.models=[]; state.values={}; state.current=null; state.mode='empty'; state.confirmId=null; draft=null;
+  state.models=[]; state.values={}; state.current=null; state.mode='empty'; state.confirmKey=null; draft=null;
+  ui.override=null; ui.peekOpenById={};
   userBtn.classList.toggle('on',!!user);
   userBtn.setAttribute('aria-label', user?`Conta: ${user.email}`:'Entrar');
   $('#loginForm').hidden=!!user; $('#acct').hidden=!user;
@@ -92,63 +161,249 @@ watchAuth(user=>{
 
 function showStatus(t){ const el=$('#status'); el.textContent=t; el.hidden=!t; }
 
-/* ---------- Modelos ---------- */
-const sig = m => m ? m.name+'\u0000'+m.body : '';
+/* ---------- Modelos e Resolução Não-Destrutiva de Hierarquia ---------- */
+const panelSig = m => m ? `${m.name}\u0000${m.body}\u0000${m.parentId || ''}` : '';
+
+function enrichModel(m) {
+  const name = m.name || 'Sem nome';
+  const body = m.body || '';
+  return {
+    id: m.id,
+    name,
+    body,
+    fav: !!m.fav,
+    parentId: m.parentId || null,
+    pending: !!m.pending,
+    _normName: norm(name),
+    _normAll: norm(name + '\n' + body),
+    _fields: fieldsOf(body)
+  };
+}
+
+function resolveHierarchy(models) {
+  const byId = new Map(models.map(m => [m.id, m]));
+  const effParentId = m => {
+    if (!m.parentId || m.parentId === m.id) return null;
+    const p = byId.get(m.parentId);
+    if (!p) return null;
+    if (p.parentId && p.parentId !== p.id && byId.has(p.parentId)) return null;
+    return p.id;
+  };
+
+  const mains = [];
+  const childrenMap = new Map();
+  models.forEach(m => {
+    const pid = effParentId(m);
+    if (pid) {
+      if (!childrenMap.has(pid)) childrenMap.set(pid, []);
+      childrenMap.get(pid).push(m);
+    } else {
+      mains.push(m);
+    }
+  });
+
+  mains.sort((a, b) => collator.compare(a.name, b.name));
+  childrenMap.forEach(list => list.sort((a, b) => collator.compare(a.name, b.name)));
+
+  return { byId, effParentId, mains, childrenMap };
+}
+
 function setModels(arr){
-  const before=sig(state.models.find(m=>m.id===state.current));
-  state.models=arr.map(m=>({
-    id:m.id,
-    name:m.name||'Sem nome',
-    body:m.body||'',
-    pending:!!m.pending
-  })).sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
-  const wasLoaded=state.loaded; state.loaded=true;
-  if(state.current && !state.models.find(m=>m.id===state.current) && state.mode!=='edit'){ state.current=null; state.mode='empty'; }
-  if(!state.current && state.mode==='empty' && state.models.length){ state.current=state.models[0].id; state.mode='use'; }
+  const before = panelSig(state.models.find(m=>m.id===state.current));
+  state.models = arr.map(enrichModel).sort((a,b) => collator.compare(a.name, b.name));
+  const wasLoaded = state.loaded; state.loaded = true;
+  if(state.current && !state.models.find(m=>m.id===state.current) && state.mode!=='edit'){
+    state.current = null; state.mode = 'empty';
+  }
+  if(!state.current && state.mode==='empty' && state.models.length){
+    const { mains } = resolveHierarchy(state.models);
+    const firstFav = mains.find(m => m.fav) || state.models.find(m => m.fav) || mains[0] || state.models[0];
+    state.current = firstFav.id; state.mode = 'use';
+  }
   renderList();
-  const after=sig(state.models.find(m=>m.id===state.current));
+  const after = panelSig(state.models.find(m=>m.id===state.current));
   if(state.mode!=='edit' && (!wasLoaded || before!==after || state.mode==='empty')) renderMain();
 }
 
-/* ---------- Lista Lateral Minimalista ---------- */
-function renderList(){
-  const q=state.query.trim().toLowerCase();
-  const items=state.models.filter(m=>!q||m.name.toLowerCase().includes(q)||m.body.toLowerCase().includes(q));
-  $('#count').textContent=state.models.length;
-  const ul=$('#list');
-  if(!state.authReady || (state.user && !state.loaded)){ ul.innerHTML='<li class="no-res">Carregando…</li>'; return; }
-  if(!state.user){ ul.innerHTML='<li class="no-res">Entre para ver seus modelos.</li>'; return; }
-  if(!items.length){ ul.innerHTML=`<li class="no-res">${q?'Nenhum modelo encontrado.':'Nenhum modelo ainda.'}</li>`; return; }
-  ul.innerHTML=items.map(m=>{
-    const n=fieldsOf(m.body).length;
-    const syncDot = m.pending ? `<span class="sync-dot" title="Sincronizando com a nuvem…"></span>` : '';
-    const badge = n > 0 ? `<span class="badge" title="${n} ${n===1?'campo':'campos'}">${n}</span>` : '';
-    const acts = state.confirmId===m.id
-      ? `<div class="confirm"><button class="yes" data-act="del-yes" data-id="${m.id}">Excluir</button><button class="no" data-act="del-no">Não</button></div>`
-      : `<div class="acts"><button class="ib" data-act="edit" data-id="${m.id}" aria-label="Editar ${esc(m.name)}" title="Editar">${I.edit}</button><button class="ib del" data-act="del" data-id="${m.id}" aria-label="Excluir ${esc(m.name)}" title="Excluir">${I.trash}</button></div>`;
-    return `<li class="item ${m.id===state.current?'active':''}"><button class="open" data-act="open" data-id="${m.id}">${syncDot}<span class="n">${esc(m.name)}</span>${badge}</button>${acts}</li>`;
-  }).join('');
+/* ---------- Lista Lateral (Favoritos, Árvore e Busca Bidirecional) ---------- */
+function renderItemHtml(m, opts = {}) {
+  const { isSub = false, parentName = '', ctxOnly = false, keyPrefix = 'tree', childCount = 0 } = opts;
+  const n = m._fields ? m._fields.length : fieldsOf(m.body).length;
+  const syncDot = m.pending ? `<span class="sync-dot" title="Sincronizando com a nuvem…"></span>` : '';
+  const badge = n > 0 ? `<span class="badge" title="${n} ${n===1?'campo':'campos'}">${n}</span>` : '';
+  const subIcon = isSub ? I.sub : '';
+  const originTag = parentName ? `<span class="sub-origin">↳ ${esc(parentName)}</span>` : '';
+  const rowKey = `${keyPrefix}:${m.id}`;
+
+  const favBtn = `<button class="fav-btn ${m.fav?'on':''}" data-act="fav" data-id="${m.id}" aria-label="${m.fav?'Remover dos favoritos':'Favoritar'} ${esc(m.name)}" title="${m.fav?'Favorito (clique para remover)':'Fixar nos favoritos'}">${I.star}</button>`;
+  const branchBtn = !isSub
+    ? `<button class="ib branch" data-act="sub-new" data-id="${m.id}" aria-label="Criar subprompt para ${esc(m.name)}" title="Criar subprompt vinculado">${I.branch}</button>`
+    : '';
+
+  const warnText = childCount > 0 ? `<span class="warn-sub">${childCount} sub${childCount>1?'s':''} virar${childCount>1?'ão':'á'} principal</span>` : '';
+  const acts = state.confirmKey === rowKey
+    ? `<div class="confirm">${warnText}<button class="yes" data-act="del-yes" data-id="${m.id}">Excluir</button><button class="no" data-act="del-no">Não</button></div>`
+    : `<div class="acts">${branchBtn}<button class="ib" data-act="edit" data-id="${m.id}" aria-label="Editar ${esc(m.name)}" title="Editar">${I.edit}</button><button class="ib del" data-act="del" data-id="${m.id}" data-key="${rowKey}" aria-label="Excluir ${esc(m.name)}" title="Excluir">${I.trash}</button></div>`;
+
+  return `<li class="item ${isSub?'is-sub':''} ${ctxOnly?'ctx-only':''} ${m.id===state.current?'active':''}">
+    ${favBtn}
+    <button class="open" data-act="open" data-id="${m.id}">${syncDot}${subIcon}<span class="n">${esc(m.name)}</span>${originTag}${badge}</button>
+    ${acts}
+  </li>`;
 }
-$('#list').addEventListener('click',async e=>{
-  const b=e.target.closest('[data-act]'); if(!b) return;
-  const id=b.dataset.id, act=b.dataset.act;
-  if(act==='open'){ if(state.mode==='edit' && !leaveEdit()) return; state.current=id; state.mode='use'; state.confirmId=null; renderList(); renderMain(); closeSide(); }
-  if(act==='edit'){ if(state.mode==='edit' && !leaveEdit()) return; state.current=id; state.confirmId=null; openEditor(id); renderList(); closeSide(); }
-  if(act==='del'){ state.confirmId=id; renderList(); clearTimeout(state._ct); state._ct=setTimeout(()=>{state.confirmId=null;renderList();},4000); }
-  if(act==='del-no'){ state.confirmId=null; renderList(); }
-  if(act==='del-yes'){
-    state.confirmId=null; const name=state.models.find(m=>m.id===id)?.name;
-    if(state.current===id){ state.current=null; state.mode='empty'; }
+
+function renderList(){
+  const q = norm(state.query.trim());
+  const { byId, effParentId, mains, childrenMap } = resolveHierarchy(state.models);
+  const subCount = state.models.length - mains.length;
+  $('#count').textContent = subCount > 0 ? `${mains.length} · ${subCount} sub${subCount>1?'s':''}` : String(state.models.length);
+
+  const ul = $('#list');
+  if(!state.authReady || (state.user && !state.loaded)){ ul.innerHTML='<li class="no-res">Carregando…</li>'; applyLayout(); return; }
+  if(!state.user){ ul.innerHTML='<li class="no-res">Entre para ver seus modelos.</li>'; applyLayout(); return; }
+  if(!state.models.length){ ul.innerHTML='<li class="no-res">Nenhum modelo ainda.</li>'; applyLayout(); return; }
+
+  let html = '';
+
+  if (q) {
+    const groups = [];
+    mains.forEach(main => {
+      const subs = childrenMap.get(main.id) || [];
+      const mainHit = main._normAll.includes(q);
+      const matchingSubs = subs.filter(s => s._normAll.includes(q));
+      if (mainHit) {
+        groups.push({ main, mainCtxOnly: false, subs });
+      } else if (matchingSubs.length > 0) {
+        groups.push({ main, mainCtxOnly: true, subs: matchingSubs });
+      }
+    });
+
+    if (!groups.length) {
+      ul.innerHTML = '<li class="no-res">Nenhum modelo ou subprompt encontrado.</li>';
+      applyLayout();
+      return;
+    }
+
+    html = groups.map(g => {
+      const allSubsCount = (childrenMap.get(g.main.id) || []).length;
+      return renderItemHtml(g.main, { isSub: false, ctxOnly: g.mainCtxOnly, keyPrefix: 'search', childCount: allSubsCount }) +
+        g.subs.map(s => renderItemHtml(s, { isSub: true, keyPrefix: 'search' })).join('');
+    }).join('');
+  } else {
+    const favMains = mains.filter(m => m.fav);
+    const regularMains = mains.filter(m => !m.fav);
+    const pinnedSubShortcuts = state.models.filter(m => {
+      const pid = effParentId(m);
+      return pid && m.fav && !byId.get(pid)?.fav;
+    }).sort((a, b) => collator.compare(a.name, b.name));
+
+    const renderBranch = main => {
+      const subs = childrenMap.get(main.id) || [];
+      return renderItemHtml(main, { isSub: false, keyPrefix: 'tree', childCount: subs.length }) +
+        subs.map(s => renderItemHtml(s, { isSub: true, keyPrefix: 'tree' })).join('');
+    };
+
+    if (favMains.length || pinnedSubShortcuts.length) {
+      html += `<li class="list-sec">${I.star}Fixados nos Favoritos</li>`;
+      html += favMains.map(renderBranch).join('');
+      html += pinnedSubShortcuts.map(s => {
+        const pid = effParentId(s);
+        const pName = (pid && byId.get(pid)?.name) || '';
+        return renderItemHtml(s, { isSub: true, parentName: pName, keyPrefix: 'fav-sub' });
+      }).join('');
+      if (regularMains.length) {
+        html += `<li class="list-sec">Modelos</li>`;
+      }
+    }
+    html += regularMains.map(renderBranch).join('');
+  }
+
+  ul.innerHTML = html;
+  applyLayout();
+}
+
+$('#list').addEventListener('click', async e => {
+  const b = e.target.closest('[data-act]'); if(!b) return;
+  const id = b.dataset.id, act = b.dataset.act;
+
+  if(act === 'open'){
+    if(state.mode==='edit' && !leaveEdit()) return;
+    state.current = id; state.mode = 'use'; state.confirmKey = null;
+    if (ui.override === 'prompt') ui.override = null;
+    renderList(); renderMain(); closeSide();
+  }
+  if(act === 'fav'){
+    const m = state.models.find(x => x.id === id);
+    if(!m) return;
+    const nextFav = !m.fav;
+    m.fav = nextFav;
+    renderList();
+    toggleFavPrompt(state.user.uid, id, nextFav).catch(err => {
+      const cur = state.models.find(x => x.id === id);
+      if (cur && cur.fav === nextFav) { cur.fav = !nextFav; renderList(); }
+      toast(saveMessage(err));
+    });
+    toast(nextFav ? `“${m.name}” fixado nos favoritos` : 'Removido dos favoritos', I.star);
+  }
+  if(act === 'sub-new'){
+    if(state.mode==='edit' && !leaveEdit()) return;
+    state.confirmKey = null;
+    openEditor(null, null, id);
+    renderList(); closeSide();
+  }
+  if(act === 'edit'){
+    if(state.mode==='edit' && !leaveEdit()) return;
+    state.current = id; state.confirmKey = null;
+    openEditor(id);
+    renderList(); closeSide();
+  }
+  if(act === 'del'){
+    state.confirmKey = b.dataset.key || `tree:${id}`;
+    renderList();
+    clearTimeout(state._ct);
+    state._ct = setTimeout(() => { state.confirmKey = null; renderList(); }, 4500);
+  }
+  if(act === 'del-no'){
+    state.confirmKey = null; renderList();
+  }
+  if(act === 'del-yes'){
+    state.confirmKey = null;
+    const target = state.models.find(m => m.id === id);
+    const name = target?.name || 'Modelo';
+    const childIds = state.models.filter(m => m.parentId === id).map(m => m.id);
+    if(state.current === id){ state.current = null; state.mode = 'empty'; }
     delete state.values[id];
-    deletePrompt(state.user.uid,id).catch(err=>{ console.error(err); toast(saveMessage(err)); });
-    toast(`“${name}” excluído`, I.trash);
+    delete ui.peekOpenById[id];
+    deletePromptWithChildren(state.user.uid, id, childIds).catch(err => {
+      console.error(err); toast(saveMessage(err));
+    });
+    toast(childIds.length ? `“${name}” excluído · ${childIds.length} sub(s) promovido(s)` : `“${name}” excluído`, I.trash);
     renderList(); renderMain();
   }
 });
-$('#q').addEventListener('input',e=>{state.query=e.target.value;renderList();});
 
-/* ---------- Painel Principal (Modo Minimalista) ---------- */
-const mod=/Mac|iPhone|iPad/.test(navigator.platform)?'⌘':'Ctrl';
+const qInput = $('#q');
+qInput.addEventListener('focus', () => {
+  clearTimeout(blurTimer);
+  ui.searchFocused = true;
+  if (state.mode !== 'edit' && ui.override === 'prompt') ui.override = null;
+  applyLayout();
+});
+qInput.addEventListener('blur', () => {
+  clearTimeout(blurTimer);
+  blurTimer = setTimeout(() => {
+    ui.searchFocused = false;
+    applyLayout();
+  }, 180);
+});
+qInput.addEventListener('input', e => {
+  state.query = e.target.value;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(renderList, 90);
+});
+
+/* ---------- Painel Principal ---------- */
+const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 
 function formatPeekHtml(body, vals){
   let html = '', last = 0;
@@ -162,23 +417,40 @@ function formatPeekHtml(body, vals){
 }
 
 function renderMain(){
-  const body=$('#body');
-  const m=state.models.find(x=>x.id===state.current);
-  if(state.mode==='use' && m){
-    const fields=fieldsOf(m.body);
-    $('#title').textContent=m.name;
-    $('#meta').textContent=fields.length
+  const body = $('#body');
+  const m = state.models.find(x => x.id === state.current);
+  if(state.mode === 'use' && m){
+    const { byId, effParentId } = resolveHierarchy(state.models);
+    const pid = effParentId(m);
+    const parentModel = pid ? byId.get(pid) : null;
+    const fields = m._fields || fieldsOf(m.body);
+
+    $('#title').textContent = m.name;
+    $('#meta').textContent = fields.length
       ? `${fields.length} ${fields.length===1?'campo':'campos'}`
       : 'Sem campos variáveis';
-    const vals=state.values[m.id]||(state.values[m.id]={});
+
+    const vals = state.values[m.id] || (state.values[m.id] = {});
+    const parentVals = parentModel ? (state.values[parentModel.id] || {}) : {};
+    const canPullFromParent = parentModel && fields.some(f => (parentVals[f] || '').trim() && !(vals[f] || '').trim());
+
+    const ctxBarHtml = parentModel
+      ? `<div class="ctx-bar">
+          <button type="button" class="parent-pill" id="goParentBtn" title="Abrir prompt principal">${I.sub}Subprompt de: <strong>${esc(parentModel.name)}</strong></button>
+          ${canPullFromParent ? `<button type="button" class="inherit-btn" id="pullParentValsBtn" title="Preencher campos em comum com os valores digitados no prompt principal">${I.field}Reaproveitar dados do principal</button>` : ''}
+        </div>`
+      : '';
+
+    const isPeekOpen = !!ui.peekOpenById[m.id];
 
     if(!fields.length){
-      body.innerHTML=`<div class="view use-no-fields">
+      body.innerHTML = `<div class="view use-no-fields">
+        ${ctxBarHtml}
         <div class="card">
           <p>Este modelo está pronto para uso e não exige preenchimento de campos.</p>
           <button class="btn" type="button" id="copyStaticBtn">${I.copy}Copiar prompt <kbd>${mod} ↵</kbd></button>
         </div>
-        <details class="peek" id="peekBox">
+        <details class="peek" id="peekBox" ${isPeekOpen ? 'open' : ''}>
           <summary>Ver texto do prompt</summary>
           <div class="doc" id="peekDoc">${esc(m.body)}</div>
         </details>
@@ -187,43 +459,68 @@ function renderMain(){
       copyBtn?.addEventListener('click', copyCurrent);
       if(!matchMedia('(hover:none)').matches) copyBtn?.focus({preventScroll:true});
     } else {
-      const slotsHtml=fields.map((f, i)=>{
-        const fid=`slot-f-${i}`;
+      const slotsHtml = fields.map((f, i) => {
+        const fid = `slot-f-${i}`;
         return `<div class="slot">
           <label for="${fid}">${I.field}${esc(f)}</label>
           <textarea id="${fid}" data-f="${esc(f)}" rows="2" placeholder="Preencha ${esc(f)}…">${esc(vals[f]||'')}</textarea>
         </div>`;
       }).join('');
 
-      body.innerHTML=`<div class="view use-minimal">
+      body.innerHTML = `<div class="view use-minimal">
+        ${ctxBarHtml}
         ${slotsHtml}
-        <details class="peek" id="peekBox">
+        <details class="peek" id="peekBox" ${isPeekOpen ? 'open' : ''}>
           <summary>Ver texto do prompt</summary>
-          <div class="doc" id="peekDoc"></div>
+          <div class="doc" id="peekDoc">${isPeekOpen ? formatPeekHtml(m.body, vals) : ''}</div>
         </details>
       </div>`;
 
-      const peekBox = $('#peekBox');
-      const peekDoc = $('#peekDoc');
-      const syncPeek = () => {
-        if(peekBox?.open && peekDoc) peekDoc.innerHTML = formatPeekHtml(m.body, vals);
-      };
-      peekBox?.addEventListener('toggle', syncPeek);
-
-      body.querySelectorAll('.slot textarea').forEach(ta=>{
+      body.querySelectorAll('.slot textarea').forEach(ta => {
         grow(ta);
-        ta.addEventListener('input',()=>{
-          vals[ta.dataset.f]=ta.value;
+        ta.addEventListener('input', () => {
+          vals[ta.dataset.f] = ta.value;
           grow(ta);
-          syncPeek();
+          if ($('#peekBox')?.open && $('#peekDoc')) {
+            $('#peekDoc').innerHTML = formatPeekHtml(m.body, vals);
+          }
         });
       });
-      const first=body.querySelector('.slot textarea');
+      const first = body.querySelector('.slot textarea');
       if(first && !matchMedia('(hover:none)').matches) first.focus({preventScroll:true});
     }
+
+    $('#goParentBtn')?.addEventListener('click', () => {
+      state.current = parentModel.id;
+      state.mode = 'use';
+      state.confirmKey = null;
+      renderList(); renderMain();
+    });
+
+    $('#pullParentValsBtn')?.addEventListener('click', () => {
+      fields.forEach(f => {
+        if (!(vals[f] || '').trim() && (parentVals[f] || '').trim()) {
+          vals[f] = parentVals[f];
+        }
+      });
+      renderMain();
+      toast('Campos preenchidos a partir do principal', I.check);
+    });
+
+    const peekBox = $('#peekBox');
+    const peekDoc = $('#peekDoc');
+    peekBox?.addEventListener('toggle', () => {
+      if (peekBox.open === !!ui.peekOpenById[m.id]) return; // Ignora toggle de montagem inicial do DOM
+      ui.peekOpenById[m.id] = peekBox.open;
+      if (peekBox.open && peekDoc && fields.length) {
+        peekDoc.innerHTML = formatPeekHtml(m.body, vals);
+      }
+      if (ui.override !== 'collapsed') ui.override = null;
+      applyLayout();
+    });
   } else {
-    $('#title').textContent='Prompteca'; $('#meta').textContent='';
-    let glyph=I.doc, h, p, btn='';
+    $('#title').textContent = 'Prompteca'; $('#meta').textContent = '';
+    let glyph = I.doc, h, p, btn = '';
     if(!state.authReady){ h='Carregando…'; p=''; }
     else if(!state.user){ glyph=I.lock; h='Entre para acessar seus modelos';
       p='Seus prompts ficam salvos na sua conta e aparecem em qualquer dispositivo.';
@@ -232,12 +529,13 @@ function renderMain(){
     else if(!state.models.length){ h='Nenhum modelo salvo';
       p='Crie um modelo com o texto do prompt e marque onde entra o seu texto livre. Depois é só preencher e copiar.';
       btn=`<button class="btn" data-new>${I.plus}Criar primeiro modelo</button>`; }
-    else { h='Escolha um modelo na lista'; p='Os campos abrem prontos para preencher.'; }
+    else { h='Escolha um modelo na lista à esquerda'; p='Os campos abrem prontos para preencher.'; }
     body.innerHTML=`<div class="view empty"><div><div class="glyph">${glyph}</div><p><strong>${h}</strong></p>${p?`<p>${p}</p>`:''}${btn}</div></div>`;
     body.querySelector('[data-new]')?.addEventListener('click',()=>openEditor(null));
     body.querySelector('[data-login]')?.addEventListener('click',e=>{ e.stopPropagation(); openPop(); });
   }
   renderDock();
+  applyLayout();
 }
 function grow(ta){ ta.style.height='auto'; ta.style.height=ta.scrollHeight+'px'; }
 
@@ -272,238 +570,35 @@ function insertAt(ta, text, s, e){
   }
 }
 
-function openEditor(id, recovered = null){
+function openEditor(id, recovered = null, defaultParentId = null){
   if(!state.user){ openPop(); toast('Entre para criar modelos.'); return; }
   const m = id ? state.models.find(x => x.id === id) : null;
   const src = recovered || m;
   const isNew = recovered ? recovered.isNew : !m;
-  const orig = recovered ? recovered.orig : (m ? JSON.stringify([m.name, m.body]) : '["",""]');
+
+  const { effParentId, mains, childrenMap } = resolveHierarchy(state.models);
+  const rawParentId = recovered !== null
+    ? (recovered.parentId || null)
+    : (m ? (m.parentId || null) : (defaultParentId || null));
+  const resolvedParentId = m ? effParentId(m) : rawParentId;
+  const hasOrphanParent = !!(rawParentId && !resolvedParentId);
+
+  const orig = recovered
+    ? recovered.orig
+    : JSON.stringify([src?.name || '', src?.body || '', rawParentId]);
+
+  const existingChildren = id ? (childrenMap.get(id) || []) : [];
+  const eligibleParents = mains.filter(x => x.id !== id);
 
   draft = {
     id: recovered?.id || m?.id || newPromptId(state.user.uid),
     name: src?.name || '',
     body: src?.body || '',
+    parentId: rawParentId,
     isNew,
     saving: false,
     orig
   };
-  state.mode='edit';
-  $('#title').textContent = isNew ? 'Novo modelo' : 'Editar modelo';
-  $('#meta').textContent='';
-  $('#body').innerHTML=`<div class="view">
-    <div class="field-row"><label class="lbl" for="nm">Nome</label><input id="nm" class="name-in" placeholder="Ex.: Resumo de acórdão" value="${esc(draft.name)}" autocomplete="off"></div>
-    <div class="field-row" style="margin-bottom:6px"><span class="lbl">Prompt</span></div>
-    <div class="editor">
-      <div class="tools" id="tools">${toolsIdle}</div>
-      <div class="wrap"><pre class="backdrop" id="bd" aria-hidden="true"></pre><textarea class="ta" id="ta" spellcheck="true" placeholder="Cole ou escreva o prompt. Use “Inserir campo” onde o texto livre deve entrar."></textarea></div>
-    </div>
-    <div class="chips" id="chips"></div>
-  </div>`;
-  const ta=$('#ta'); ta.value=draft.body;
-  const endPos=ta.value.length;
-  ta.setSelectionRange(endPos, endPos);
-  savedRange={s:endPos, e:endPos};
-  syncBackdrop();
+  state.mode = 'edit';
 
-  const saveSel=()=>{ savedRange={s:ta.selectionStart, e:ta.selectionEnd}; };
-  ['keyup','mouseup','select','input'].forEach(ev=>ta.addEventListener(ev, saveSel));
-
-  ta.addEventListener('input',()=>{draft.body=ta.value;syncBackdrop();});
-  ta.addEventListener('scroll',()=>{$('#bd').scrollTop=ta.scrollTop;});
-  new ResizeObserver(syncBackdrop).observe(ta);
-  $('#nm').addEventListener('input',e=>draft.name=e.target.value);
-  bindAddFieldBtn();
-  (draft.isNew && !recovered ? $('#nm') : ta).focus();
-  renderDock();
-}
-function syncBackdrop(){
-  const ta=$('#ta'), bd=$('#bd'); if(!ta) return;
-  bd.innerHTML=esc(ta.value).replace(/\{\{\s*([^{}]+?)\s*\}\}/g,'<mark>$&</mark>')+'\n';
-  bd.style.height=ta.offsetHeight+'px'; bd.scrollTop=ta.scrollTop;
-  const fs=fieldsOf(ta.value);
-  $('#chips').innerHTML= fs.length
-    ? `<span class="lbl">Campos</span>`+fs.map(f=>`<span class="chip">${esc(f)}</span>`).join('')
-    : `<span class="lbl" style="text-transform:none;letter-spacing:0">Sem campos: o modelo será copiado como está.</span>`;
-}
-function askFieldName(){
-  const ta=$('#ta');
-  if(!ta) return;
-  const s=Math.min(savedRange.s, ta.value.length);
-  const e=Math.min(savedRange.e, ta.value.length);
-  const sel=ta.value.slice(s,e).trim().replace(/[{}]/g,'').slice(0,60);
-  const tools=$('#tools');
-  tools.innerHTML=`<span class="fname">${I.field}<input id="fn" placeholder="Nome do campo" value="${esc(sel)}" maxlength="60"><button class="tbtn" id="fok" type="button">Inserir</button><button class="mini" id="fcancel" type="button">Cancelar</button></span>`;
-  const fn=$('#fn'); fn.focus(); fn.select();
-  const restore=()=>{ tools.innerHTML=toolsIdle; bindAddFieldBtn(); };
-  const commit=()=>{
-    const name=fn.value.trim().replace(/[{}]/g,'')||'Texto livre';
-    const token=`{{${name}}}`;
-    restore();
-    insertAt(ta, token, s, e);
-    const pos = s + token.length;
-    savedRange = { s: pos, e: pos };
-    ta.setSelectionRange(pos, pos);
-  };
-  $('#fok').addEventListener('click',commit);
-  $('#fcancel').addEventListener('click',()=>{restore();ta.focus();ta.setSelectionRange(s,e);});
-  fn.addEventListener('keydown',ev=>{
-    if(ev.key==='Enter'){ev.preventDefault();commit();}
-    if(ev.key==='Escape'){ev.preventDefault();restore();ta.focus();ta.setSelectionRange(s,e);}
-  });
-}
-function dirty(){ return draft && JSON.stringify([draft.name,draft.body])!==draft.orig; }
-function leaveEdit(){
-  if(draft?.saving){ toast('Aguarde o salvamento terminar.'); return false; }
-  if(dirty() && !state._leaveOk){ state._leaveOk=true; toast('Alterações não salvas. Clique de novo para descartar.'); setTimeout(()=>state._leaveOk=false,3000); return false; }
-  state._leaveOk=false; draft=null; return true;
-}
-
-function finishSave(m, isPending){
-  const i=state.models.findIndex(x=>x.id===m.id);
-  const item={...m, pending:isPending};
-  if(i>=0) state.models[i]=item; else state.models.push(item);
-  state.models.sort((a,b)=>a.name.localeCompare(b.name,'pt-BR'));
-  draft=null; state.current=m.id; state.mode='use';
-  renderList(); renderMain();
-}
-
-async function saveDraft(){
-  if(!state.user){ openPop(); toast('Entre para salvar.'); return; }
-  if(!draft || draft.saving) return;
-  const name=draft.name.trim(), body=draft.body;
-  if(!name){ $('#nm').focus(); toast('Dê um nome ao modelo.'); return; }
-  if(!body.trim()){ $('#ta').focus(); toast('Escreva o texto do prompt.'); return; }
-
-  const m={id:draft.id, name, body};
-  const prevModel=state.models.find(x=>x.id===m.id);
-  const backup={
-    id:m.id,
-    name:m.name,
-    body:m.body,
-    orig:draft.orig,
-    isNew:draft.isNew,
-    prev:prevModel ? {...prevModel} : null
-  };
-
-  draft.saving=true;
-  renderDock();
-
-  const wait = navigator.onLine ? 2500 : 0;
-  const writePromise = savePrompt(state.user.uid, m);
-  let outcome;
-  try {
-    outcome = await Promise.race([
-      writePromise.then(() => 'ok'),
-      new Promise(res => setTimeout(() => res('pending'), wait))
-    ]);
-  } catch (err) {
-    console.error('Erro ao salvar no Firestore:', err);
-    if(draft && draft.id === m.id){
-      draft.saving = false;
-      renderDock();
-    }
-    const msg = saveMessage(err);
-    showStatus(msg);
-    toast(msg);
-    return;
-  }
-
-  if(!draft || draft.id !== m.id) return;
-
-  if(outcome === 'ok'){
-    showStatus('');
-    finishSave(m, false);
-    toast('Modelo salvo', I.check);
-  } else {
-    finishSave(m, true);
-    toast('Salvo neste aparelho · sincronizando…');
-    writePromise.catch(err => {
-      console.error('Erro tardio na sincronização com o Firestore:', err);
-      const msg = saveMessage(err);
-      showStatus(msg);
-      toast(msg);
-
-      // Reverte o item otimista local caso o rollback do onSnapshot ainda não tenha processado
-      const idx = state.models.findIndex(x => x.id === backup.id);
-      if(backup.isNew){
-        if(idx >= 0) state.models.splice(idx, 1);
-      } else if(backup.prev && idx >= 0){
-        state.models[idx] = backup.prev;
-      }
-
-      // Restaura o editor com o backup completo para evitar qualquer perda de texto
-      if(state.mode !== 'edit' || !dirty()){
-        state.current = backup.isNew ? null : backup.id;
-        openEditor(backup.id, backup);
-        renderList();
-      }
-    });
-  }
-}
-function cancelEdit(){ if(!leaveEdit()) return; state.mode=state.current&&state.models.find(x=>x.id===state.current)?'use':'empty'; renderList(); renderMain(); }
-
-/* ---------- Copiar / limpar ---------- */
-function assemble(m){ const vals=state.values[m.id]||{};
-  const txt=m.body.replace(FIELD_RE,(_,f)=>(vals[f]||'').trim());
-  return {txt, empty:fieldsOf(m.body).filter(f=>!(vals[f]||'').trim()).length};
-}
-function copyCurrent(){
-  const m=state.models.find(x=>x.id===state.current); if(!m) return;
-  const {txt,empty}=assemble(m);
-  const done=()=>toast(empty?`Copiado · ${empty} ${empty===1?'campo vazio':'campos vazios'}`:'Prompt copiado',I.check);
-  if(empty) document.querySelectorAll('.slot').forEach(s=>{ if(!s.querySelector('textarea').value.trim()){ s.classList.remove('empty-warn'); void s.offsetWidth; s.classList.add('empty-warn'); } });
-  try{ navigator.clipboard.writeText(txt).then(done,()=>fallbackCopy(txt,done)); }catch(e){ fallbackCopy(txt,done); }
-}
-function fallbackCopy(txt,done){
-  const t=document.createElement('textarea'); t.value=txt; t.style.position='fixed'; t.style.opacity='0'; document.body.appendChild(t); t.select();
-  let ok=false; try{ ok=document.execCommand('copy'); }catch(e){} t.remove();
-  ok?done():toast('Não deu para copiar automaticamente. Use Ctrl+C no texto.');
-}
-function clearFields(){ if(!state.current) return; state.values[state.current]={}; renderMain(); toast('Campos limpos',I.eraser); }
-
-/* ---------- Dock ---------- */
-function renderDock(){
-  const m=state.models.find(x=>x.id===state.current);
-  const using=state.mode==='use'&&m;
-  const hasFields=using&&fieldsOf(m.body).length>0;
-  let h='';
-  if(state.mode==='edit'){
-    const saving=!!draft?.saving;
-    h+=`<button class="dk primary" data-d="save" ${saving?'disabled':''}>${I.save}<span class="lbl-t">${saving?'Salvando…':'Salvar'}</span><kbd>${mod} S</kbd></button>`;
-    h+=`<button class="dk" data-d="cancel" ${saving?'disabled':''}>${I.x}<span class="lbl-t">Cancelar</span></button>`;
-  } else {
-    h+=`<button class="dk ${using?'':'primary'}" data-d="new">${I.plus}<span class="lbl-t">Novo modelo</span></button>`;
-    if(using){
-      h+=`<span class="sep"></span>`;
-      if(hasFields){
-        h+=`<button class="dk primary" data-d="copy">${I.copy}<span class="lbl-t">Copiar prompt</span><kbd>${mod} ↵</kbd></button>`;
-        h+=`<button class="dk" data-d="clear" aria-label="Limpar campos">${I.eraser}<span class="tip">Limpar campos</span></button>`;
-      }
-      h+=`<button class="dk" data-d="edit" aria-label="Editar modelo">${I.edit}<span class="tip">Editar modelo</span></button>`;
-    }
-  }
-  h+=`<button class="dk only-mobile" data-d="list" aria-label="Modelos">${I.list}</button>`;
-  $('#dock').innerHTML=h;
-}
-$('#dock').addEventListener('click',e=>{
-  const b=e.target.closest('[data-d]'); if(!b || b.disabled) return;
-  ({ new:()=>{ if(state.mode==='edit'&&!leaveEdit())return; openEditor(null); renderList(); },
-     save:saveDraft, cancel:cancelEdit, copy:copyCurrent, clear:clearFields,
-     edit:()=>openEditor(state.current), list:toggleSide })[b.dataset.d]();
-});
-document.addEventListener('keydown',e=>{
-  const k=e.key.toLowerCase(), m=e.metaKey||e.ctrlKey;
-  if(m&&k==='s'&&state.mode==='edit'){ e.preventDefault(); saveDraft(); }
-  if(m&&k==='enter'&&state.mode==='use'){ e.preventDefault(); copyCurrent(); }
-  if(e.key==='Escape'){ if(!pop.hidden) closePop(); else if($('#side').classList.contains('open-m')) closeSide(); }
-});
-
-/* ---------- Mobile ---------- */
-function toggleSide(){ $('#side').classList.toggle('open-m'); $('#scrim').classList.toggle('on'); }
-function closeSide(){ $('#side').classList.remove('open-m'); $('#scrim').classList.remove('on'); }
-$('#scrim').addEventListener('click',closeSide);
-
-let tt;
-function toast(msg,icon=''){ const t=$('#toast'); t.innerHTML=icon+esc(msg); t.classList.add('show'); clearTimeout(tt); tt=setTimeout(()=>t.classList.remove('show'),2600); }
-
-renderList(); renderMain();
+  const orphanOpt = hasOrphanParent
