@@ -601,4 +601,303 @@ function openEditor(id, recovered = null, defaultParentId = null){
   };
   state.mode = 'edit';
 
-  const orphanOpt = hasOrphanParent
+  const showOrphan = !!rawParentId && !eligibleParents.some(p => p.id === rawParentId);
+  const orphanOpt = showOrphan
+    ? `<option value="${esc(rawParentId)}" selected>(vínculo anterior indisponível)</option>`
+    : '';
+  const parentOpts =
+    `<option value=""${!rawParentId ? ' selected' : ''}>Nenhum — prompt principal</option>` +
+    orphanOpt +
+    eligibleParents.map(p =>
+      `<option value="${esc(p.id)}"${p.id === rawParentId ? ' selected' : ''}>${esc(p.name)}</option>`
+    ).join('');
+
+  draft._childIds = existingChildren.map(c => c.id);
+  draft._parentNames = new Map(eligibleParents.map(p => [p.id, p.name]));
+
+  $('#title').textContent = isNew ? (rawParentId ? 'Novo subprompt' : 'Novo modelo') : 'Editar modelo';
+  $('#body').innerHTML = `<div class="view edit">
+    <div class="field-grid">
+      <div class="field-row">
+        <label class="lbl" for="nameIn">Nome</label>
+        <input class="name-in" id="nameIn" type="text" maxlength="120" placeholder="Ex.: Resumo de acórdão" autocomplete="off">
+      </div>
+      <div class="field-row">
+        <label class="lbl" for="parentSel">Subprompt de</label>
+        <select class="parent-select" id="parentSel">${parentOpts}</select>
+        <div class="reparent-note" id="reparentNote" hidden></div>
+      </div>
+    </div>
+    <div class="field-row">
+      <span class="lbl">Texto do prompt</span>
+      <div class="editor">
+        <div class="tools" id="tools">${toolsIdle}</div>
+        <div class="wrap">
+          <div class="backdrop" id="bd" aria-hidden="true"></div>
+          <textarea class="ta" id="ta" spellcheck="false" placeholder="Cole o texto do prompt. Use “Inserir campo” para marcar onde entra o seu texto livre."></textarea>
+        </div>
+      </div>
+      <div class="chips" id="chips"></div>
+    </div>
+  </div>`;
+
+  const ta = $('#ta'), nameIn = $('#nameIn'), sel = $('#parentSel');
+  nameIn.value = draft.name;
+  ta.value = draft.body;
+  savedRange = { s: ta.value.length, e: ta.value.length };
+
+  nameIn.addEventListener('input', () => { draft.name = nameIn.value; });
+  nameIn.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); ta.focus(); }
+  });
+  sel.addEventListener('change', () => { draft.parentId = sel.value || null; updateReparentNote(); });
+  ta.addEventListener('input', syncEditor);
+  ta.addEventListener('scroll', () => { const bd = $('#bd'); if (bd) bd.scrollTop = ta.scrollTop; });
+  bindAddFieldBtn();
+
+  syncEditor();
+  updateReparentNote();
+  renderDock();
+  applyLayout();
+  if (!matchMedia('(hover:none)').matches) (isNew ? nameIn : ta).focus({ preventScroll: true });
+}
+
+function backdropHtml(text) {
+  let html = '', last = 0;
+  for (const mt of text.matchAll(FIELD_RE)) {
+    html += esc(text.slice(last, mt.index)) + `<mark>${esc(mt[0])}</mark>`;
+    last = mt.index + mt[0].length;
+  }
+  return html + esc(text.slice(last)) + '\n';
+}
+
+function syncEditor() {
+  const ta = $('#ta');
+  if (!ta || !draft) return;
+  draft.body = ta.value;
+  const bd = $('#bd');
+  bd.innerHTML = backdropHtml(ta.value);
+  bd.scrollTop = ta.scrollTop;
+  const f = fieldsOf(ta.value);
+  $('#chips').innerHTML = f.map(x => `<span class="chip">${esc(x)}</span>`).join('');
+  $('#meta').textContent = f.length ? `${f.length} ${f.length === 1 ? 'campo' : 'campos'}` : 'Sem campos variáveis';
+}
+
+function updateReparentNote() {
+  const el = $('#reparentNote');
+  if (!el || !draft) return;
+  const n = draft._childIds.length;
+  const pName = draft._parentNames.get(draft.parentId);
+  let t = '';
+  if (draft.parentId && !pName) t = 'O prompt principal vinculado não existe mais. Escolha outro ou deixe como principal.';
+  else if (pName && n) t = `Os ${n} subprompt${n > 1 ? 's' : ''} deste modelo também passarão a ser subprompts de “${pName}”.`;
+  el.textContent = t;
+  el.hidden = !t;
+}
+
+/* ---------- Inserir campo ---------- */
+function askFieldName() {
+  const ta = $('#ta'), tools = $('#tools');
+  if (!ta || !tools) return;
+  const len = ta.value.length;
+  const r = { s: Math.min(savedRange.s, len), e: Math.min(savedRange.e, len) };
+  const picked = ta.value.slice(r.s, r.e).trim();
+  const useSel = !!picked && !picked.includes('\n') && picked.length <= 60;
+
+  tools.innerHTML = `<span class="fname">{{<input id="fname" type="text" maxlength="60" placeholder="Nome do campo" autocomplete="off" value="${esc(useSel ? picked : '')}">}}</span>
+    <button class="tbtn" id="fOk" type="button">${I.check}Inserir</button>
+    <button class="mini" id="fNo" type="button">Cancelar</button>`;
+  const input = $('#fname');
+  input.focus();
+  input.select();
+
+  const close = () => { tools.innerHTML = toolsIdle; bindAddFieldBtn(); };
+  const cancel = () => { close(); ta.focus(); ta.setSelectionRange(r.s, r.e); };
+  const confirm = () => {
+    const name = input.value.replace(/[{}]/g, '').replace(/\s+/g, ' ').trim();
+    if (!name) { toast('Dê um nome ao campo.'); input.focus(); return; }
+    close();
+    insertAt(ta, `{{${name}}}`, r.s, useSel ? r.e : r.s);
+    syncEditor();
+  };
+  $('#fOk').addEventListener('click', confirm);
+  $('#fNo').addEventListener('click', cancel);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); confirm(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancel(); }
+  });
+}
+
+/* ---------- Alterações, saída e salvamento ---------- */
+function dirty() {
+  return !!draft && JSON.stringify([draft.name, draft.body, draft.parentId || null]) !== draft.orig;
+}
+
+// Retorna true quando pode sair do editor. Com alterações, exige repetir a ação em 3 s.
+function leaveEdit() {
+  if (!draft) return true;
+  if (draft.saving) { toast('Aguarde o salvamento terminar.'); return false; }
+  if (dirty() && !state._leaveOk) {
+    state._leaveOk = true;
+    toast('Há alterações não salvas. Repita a ação para descartar.');
+    clearTimeout(state._lt);
+    state._lt = setTimeout(() => { state._leaveOk = false; }, 3000);
+    return false;
+  }
+  state._leaveOk = false;
+  draft = null;
+  return true;
+}
+
+function exitEditor() {
+  draft = null;
+  state.mode = state.models.some(m => m.id === state.current) ? 'use' : 'empty';
+  renderList(); renderMain();
+}
+
+async function saveDraft() {
+  if (!draft || draft.saving || !state.user) return;
+  const d = draft;
+  d.name = ($('#nameIn')?.value ?? d.name).trim();
+  d.body = $('#ta')?.value ?? d.body;
+  if (!d.name) { toast('Dê um nome ao modelo.'); $('#nameIn')?.focus(); return; }
+  if (!d.body.trim()) { toast('O texto do prompt está vazio.'); $('#ta')?.focus(); return; }
+  if (d.body.length > 250000) { toast('Texto acima do limite de 250 mil caracteres.'); return; }
+
+  const uid = state.user.uid;
+  const payload = { id: d.id, name: d.name, body: d.body, parentId: d.parentId || null };
+  const moveIds = payload.parentId && d._parentNames.has(payload.parentId) ? d._childIds : [];
+
+  d.saving = true;
+  renderDock();
+  const write = moveIds.length ? savePromptWithReparent(uid, payload, moveIds) : savePrompt(uid, payload);
+
+  // Offline, a promessa do Firestore só resolve ao sincronizar: após 6 s tratamos como salvo localmente.
+  let timedOut = false;
+  try {
+    await Promise.race([write, new Promise(res => setTimeout(() => { timedOut = true; res(); }, 6000))]);
+  } catch (err) {
+    console.error(err);
+    d.saving = false;
+    toast(saveMessage(err));
+    if (draft === d) renderDock();
+    return;
+  }
+  if (timedOut) {
+    write.catch(err => {
+      console.error(err);
+      toast(saveMessage(err));
+      if (state.user?.uid === uid && state.mode !== 'edit') {
+        openEditor(d.isNew ? null : d.id, {
+          id: d.id, name: d.name, body: d.body, parentId: payload.parentId, isNew: d.isNew, orig: d.orig
+        });
+      }
+    });
+  }
+  if (draft !== d) return; // saiu da conta durante o salvamento
+
+  // Atualização otimista; o snapshot do Firestore confirma em seguida.
+  const prev = state.models.find(m => m.id === d.id);
+  const rec = enrichModel({ ...payload, fav: prev?.fav, pending: true });
+  state.models = state.models.filter(m => m.id !== d.id).concat(rec)
+    .sort((a, b) => collator.compare(a.name, b.name));
+  moveIds.forEach(cid => { const c = state.models.find(m => m.id === cid); if (c) c.parentId = payload.parentId; });
+
+  state.current = d.id; state.mode = 'use'; state.confirmKey = null; draft = null;
+  if (ui.override === 'prompt') ui.override = null;
+  renderList(); renderMain();
+  toast(d.isNew ? 'Modelo criado' : 'Modelo salvo', I.check);
+}
+
+/* ---------- Copiar ---------- */
+async function copyCurrent() {
+  const m = state.models.find(x => x.id === state.current);
+  if (!m || state.mode !== 'use') return;
+  const vals = state.values[m.id] || {};
+  const fields = m._fields || fieldsOf(m.body);
+  const empty = fields.filter(f => !(vals[f] || '').trim());
+
+  if (empty.length) {
+    const slots = [...document.querySelectorAll('.slot')];
+    const bad = slots.filter(s => empty.includes(s.querySelector('textarea').dataset.f));
+    bad.forEach(s => { s.classList.remove('empty-warn'); void s.offsetWidth; s.classList.add('empty-warn'); });
+    bad[0]?.querySelector('textarea').focus();
+    toast(empty.length === 1 ? `Preencha “${empty[0]}”` : `Faltam ${empty.length} campos`);
+    return;
+  }
+
+  const text = m.body.replace(FIELD_RE, (_, n) => (vals[n] || '').trim());
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const t = document.createElement('textarea');
+    t.value = text; t.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+    document.body.appendChild(t); t.select();
+    try { document.execCommand('copy'); } catch (__) { toast('Não foi possível copiar.'); }
+    t.remove();
+  }
+  toast('Prompt copiado', I.check);
+}
+
+/* ---------- Dock (ações do painel) ---------- */
+function renderDock() {
+  const dock = $('#dock');
+  if (!dock) return;
+  if (!state.user) { dock.hidden = true; dock.innerHTML = ''; return; }
+  dock.hidden = false;
+
+  const b = (act, icon, label, o = {}) =>
+    `<button class="dk ${o.primary ? 'primary' : ''} ${o.cls || ''}" type="button" data-dk="${act}"${o.disabled ? ' disabled' : ''} aria-label="${esc(label)}">` +
+    `${icon}<span class="lbl-t">${esc(label)}</span>${o.kbd ? `<kbd>${o.kbd}</kbd>` : ''}${o.primary ? '' : `<span class="tip">${esc(label)}</span>`}</button>`;
+  const listBtn = b('list', I.list, 'Modelos', { cls: 'only-mobile' });
+  const sep = '<span class="sep"></span>';
+  const cur = state.models.find(x => x.id === state.current);
+
+  if (state.mode === 'edit') {
+    dock.innerHTML = listBtn + b('cancel', I.x, 'Cancelar') + sep +
+      b('save', I.save, draft?.saving ? 'Salvando…' : 'Salvar', { primary: true, kbd: `${mod} S`, disabled: !!draft?.saving });
+  } else if (state.mode === 'use' && cur) {
+    dock.innerHTML = listBtn + b('new', I.plus, 'Novo') + b('edit', I.edit, 'Editar') + sep +
+      b('copy', I.copy, 'Copiar', { primary: true, kbd: `${mod} ↵` });
+  } else {
+    dock.innerHTML = listBtn + b('new', I.plus, 'Novo modelo', { primary: true });
+  }
+}
+
+$('#dock').addEventListener('click', e => {
+  const btn = e.target.closest('[data-dk]');
+  if (!btn) return;
+  const act = btn.dataset.dk;
+  if (act === 'list') openSide();
+  else if (act === 'copy') copyCurrent();
+  else if (act === 'save') saveDraft();
+  else if (act === 'cancel') { if (leaveEdit()) exitEditor(); }
+  else if (act === 'new') { if (state.mode === 'edit' && !leaveEdit()) return; openEditor(null); renderList(); }
+  else if (act === 'edit') { if (state.current) { openEditor(state.current); renderList(); } }
+});
+
+/* ---------- Barra lateral no mobile, toast e atalhos ---------- */
+function openSide() { $('#side').classList.add('open-m'); $('#scrim').classList.add('on'); }
+function closeSide() { $('#side').classList.remove('open-m'); $('#scrim').classList.remove('on'); }
+$('#scrim').addEventListener('click', closeSide);
+
+let toastTimer = null;
+function toast(msg, icon = '') {
+  const el = $('#toast');
+  if (!el) return;
+  el.innerHTML = `${icon}<span>${esc(msg)}</span>`;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+document.addEventListener('keydown', e => {
+  const meta = e.ctrlKey || e.metaKey;
+  const k = (e.key || '').toLowerCase();
+  if (meta && k === 'enter' && state.mode === 'use') { e.preventDefault(); copyCurrent(); }
+  else if (meta && k === 's' && state.mode === 'edit') { e.preventDefault(); saveDraft(); }
+  else if (k === 'escape') { closeSide(); if (!pop.hidden) closePop(); }
+});
+
+window.addEventListener('beforeunload', e => { if (dirty()) { e.preventDefault(); e.returnValue = ''; } });
+matchMedia('(min-width: 901px)').addEventListener('change', applyLayout);
