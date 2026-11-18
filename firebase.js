@@ -6,7 +6,8 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
-  collection, doc, setDoc, deleteDoc, writeBatch, onSnapshot, serverTimestamp
+  collection, doc, setDoc, updateDoc, deleteDoc, onSnapshot,
+  serverTimestamp, deleteField
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -52,39 +53,60 @@ export function watchPrompts(uid, onData, onError) {
 
 export const newPromptId = uid => doc(promptsCol(uid)).id;
 
-export const savePrompt = (uid, m) =>
-  setDoc(promptRef(uid, m.id), {
+/**
+ * Grava o modelo principal ou subprompt de forma isolada.
+ * Assim, falhas em referências de filhos nunca abortam o salvamento do texto principal.
+ */
+export function savePrompt(uid, m) {
+  const data = {
     name: m.name,
     body: m.body,
     parentId: m.parentId ?? null,
+    order: m.parentId && typeof m.order === "number" ? m.order : deleteField(),
     updatedAt: serverTimestamp()
-  }, { merge: true });
+  };
+  return setDoc(promptRef(uid, m.id), data, { merge: true });
+}
 
-export function savePromptWithReparent(uid, m, childIdsToMove = []) {
-  const b = writeBatch(db);
-  b.set(promptRef(uid, m.id), {
-    name: m.name,
-    body: m.body,
-    parentId: m.parentId ?? null,
-    updatedAt: serverTimestamp()
-  }, { merge: true });
-  childIdsToMove.forEach(cid => {
-    b.set(promptRef(uid, cid), { parentId: m.parentId ?? null }, { merge: true });
+/**
+ * Atualiza filhos transferidos de pai e/ou reordenados de forma isolada via updateDoc,
+ * impedindo a criação de documentos-fantasma e evitando que 1 filho ausente derrube os demais.
+ */
+export async function updateChildrenAfterSave(uid, { reparentEntries = [], orderIds = [] } = {}) {
+  const ops = [];
+  reparentEntries.forEach(({ id, parentId, order }) => {
+    ops.push(
+      updateDoc(promptRef(uid, id), {
+        parentId: parentId ?? null,
+        order: parentId && typeof order === "number" ? order : deleteField()
+      })
+    );
   });
-  return b.commit();
+  orderIds.forEach((sid, idx) => {
+    ops.push(updateDoc(promptRef(uid, sid), { order: idx }));
+  });
+  if (ops.length) await Promise.allSettled(ops);
+}
+
+export async function reorderSubPrompts(uid, orderedSubIds = []) {
+  const ops = orderedSubIds.map((sid, idx) => updateDoc(promptRef(uid, sid), { order: idx }));
+  const results = await Promise.allSettled(ops);
+  const rejected = results.find(r => r.status === "rejected" && r.reason?.code !== "not-found");
+  if (rejected) throw rejected.reason;
 }
 
 export const toggleFavPrompt = (uid, id, fav) =>
-  setDoc(promptRef(uid, id), { fav: !!fav }, { merge: true });
+  updateDoc(promptRef(uid, id), { fav: !!fav });
 
-export function deletePromptWithChildren(uid, id, childIds = []) {
-  if (!childIds.length) return deleteDoc(promptRef(uid, id));
-  const b = writeBatch(db);
-  childIds.forEach(cid => {
-    b.set(promptRef(uid, cid), { parentId: null }, { merge: true });
-  });
-  b.delete(promptRef(uid, id));
-  return b.commit();
+export async function deletePromptWithChildren(uid, id, childIds = []) {
+  await deleteDoc(promptRef(uid, id));
+  if (childIds.length) {
+    await Promise.allSettled(
+      childIds.map(cid =>
+        updateDoc(promptRef(uid, cid), { parentId: null, order: deleteField() })
+      )
+    );
+  }
 }
 
 export const deletePrompt = (uid, id) => deleteDoc(promptRef(uid, id));
@@ -103,9 +125,9 @@ export function authMessage(err) {
 export function saveMessage(err) {
   const c = err?.code || "";
   if (c === "permission-denied")
-    return "Permissão negada pelo Firestore. Confira se as Regras de Segurança permitem fav e parentId.";
+    return "Permissão negada pelo Firestore. Confira se as Regras de Segurança permitem fav, parentId e order.";
   if (c === "not-found")
-    return "Banco Firestore não encontrado. Crie o banco (default) em modo Nativo.";
+    return "Registro ou banco Firestore não encontrado (verifique se o modelo ainda existe ou se o banco Nativo foi criado).";
   if (c === "unauthenticated")
     return "Sessão expirada. Entre novamente para salvar.";
   if (c === "invalid-argument")
