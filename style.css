@@ -194,17 +194,11 @@ svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:
 .play-btn:hover{background:var(--accent);color:var(--on-accent);transform:scale(1.05)}
 .play-btn.direct:hover{background:var(--ok);color:#fff;border-color:var(--ok)}
 
-/* Ações Secundárias (Terminam em right: 44px no desktop; ou fixas no modo Organizar) */
+/* Ações Secundárias (Aparecem à esquerda do Reiniciar e do Play, sem jamais cobri-los) */
 .acts{
-  position:absolute;right:44px;top:50%;transform:translateY(-50%);
-  display:flex;align-items:center;gap:2px;padding-left:20px;padding-right:4px;
-  background:linear-gradient(90deg,transparent,var(--surface-2) 20%);
-  border-radius:8px;opacity:0;pointer-events:none;transition:opacity .15s;z-index:2;
+  display:none;align-items:center;gap:2px;flex:none;
 }
-.item.was-copied .acts{background:linear-gradient(90deg,transparent,color-mix(in srgb,var(--ok) 12%,var(--surface)) 20%)}
-.item.is-next-step .acts{background:linear-gradient(90deg,transparent,var(--accent-soft) 20%)}
-.item:hover .acts,.item:focus-within .acts,.side.organize-mode .acts{opacity:1;pointer-events:auto}
-.side.organize-mode .acts{position:static;transform:none;background:none!important;padding-left:4px}
+.item:hover .acts,.item:focus-within .acts,.side.organize-mode .acts{display:flex}
 
 .ib{width:28px;height:28px;display:grid;place-items:center;border-radius:7px;color:var(--muted);transition:background .15s,color .15s}
 .ib:hover{background:var(--surface);color:var(--accent)}

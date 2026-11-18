@@ -482,8 +482,8 @@ function renderItemHtml(m, opts = {}) {
     <button class="open" data-act="open" data-id="${m.id}" ${parentId?`data-parent="${parentId}"`:''} title="Abrir ${esc(m.name)}">
       ${syncDot}${stepIndicator}<span class="n">${esc(m.name)}</span>${originTag}${nextBadge}${badge}
     </button>
-    ${resetBtn}
     ${acts}
+    ${resetBtn}
     ${playBtn}
   </li>`;
 }
