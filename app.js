@@ -4,6 +4,10 @@ import {
   toggleFavPrompt, deletePromptWithChildren,
   authMessage, saveMessage
 } from "./firebase.js?v=3";
+import {
+  detectMarkdown, classifyHtmlPaste, htmlToMarkdown,
+  renderMarkdown, highlightMarkdownBackdrop
+} from "./markdown.js?v=4";
 
 const I = {
   plus:'<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
@@ -45,6 +49,35 @@ let unsubPrompts = null;
 let draft = null;
 let savedRange = { s: 0, e: 0 };
 let searchTimer = null;
+
+const EDITOR_VIEW_KEY = 'prompteca_editor_view';
+const splitMQ = matchMedia('(min-width: 860px)');
+const canSplitEditor = () => splitMQ.matches;
+
+let previewTimer = null;
+let syncRaf = 0;
+let scrollRaf = 0;
+let lastChipsSig = null;
+let plainPasteUntil = 0;
+let pasteActionSnapshot = null;
+
+function readSavedEditorView() {
+  try {
+    const v = localStorage.getItem(EDITOR_VIEW_KEY);
+    return (v === 'edit' || v === 'split' || v === 'preview') ? v : null;
+  } catch (_) { return null; }
+}
+
+function saveEditorView(view) {
+  try { localStorage.setItem(EDITOR_VIEW_KEY, view); } catch (_) {}
+}
+
+// Rebaixa automaticamente o modo Dividido se a janela cair abaixo de 860px (preservando preferência salva)
+splitMQ.addEventListener('change', () => {
+  if (state.mode === 'edit' && draft?.view === 'split' && !splitMQ.matches) {
+    setEditorView('edit', { focus: false, remember: false });
+  }
+});
 
 /* ---------- Modo "Organizar" (Especialmente útil em Mobile/Toque) ---------- */
 const orgBtn = $('#orgBtn');
@@ -98,7 +131,16 @@ function syncPanelVisibility() {
   const scrim = $('#scrim');
   const root = $('#appRoot');
 
-  if (panel) panel.hidden = !isOpen;
+  if (panel) {
+    panel.hidden = !isOpen;
+    if (state.mode !== 'edit') {
+      panel.classList.remove('panel-wide');
+      clearTimeout(previewTimer);
+      cancelAnimationFrame(syncRaf);
+      cancelAnimationFrame(scrollRaf);
+      pasteActionSnapshot = null;
+    }
+  }
   if (side) side.toggleAttribute('inert', isOpen);
   if (scrim) scrim.classList.toggle('on', isOpen);
   if (root) root.dataset.panelOpen = String(isOpen);
@@ -839,6 +881,159 @@ function renderDraftSubOrderList() {
   });
 }
 
+function updateMarkdownPreview(immediate = false) {
+  if (!draft || draft.view === 'edit') return;
+  const run = () => {
+    const pv = $('#mdPreview');
+    if (!pv || !draft) return;
+    pv.innerHTML = renderMarkdown(draft.body, { fieldRe: FIELD_RE });
+  };
+  clearTimeout(previewTimer);
+  if (immediate || (draft.body?.length || 0) < 4000) run();
+  else previewTimer = setTimeout(run, 120);
+}
+
+function setEditorView(view, { focus = true, remember = true } = {}) {
+  if (!draft) return;
+  const resolved = view === 'split' && !canSplitEditor() ? 'preview' : view;
+  draft.view = resolved;
+  if (remember) saveEditorView(resolved);
+
+  const box = $('#editorBox');
+  const editPane = $('#editPane');
+  const preview = $('#mdPreview');
+  const panel = $('#panel');
+
+  if (box) box.dataset.view = resolved;
+  if (panel) panel.classList.toggle('panel-wide', resolved === 'split');
+  if (editPane) editPane.hidden = resolved === 'preview';
+  if (preview) preview.hidden = resolved === 'edit';
+
+  document.querySelectorAll('[data-ed-view]').forEach(btn => {
+    btn.setAttribute('aria-pressed', String(btn.dataset.edView === resolved));
+  });
+
+  if (resolved !== 'edit') {
+    updateMarkdownPreview(true);
+  } else if (focus && !matchMedia('(hover:none)').matches) {
+    $('#ta')?.focus({ preventScroll: true });
+  }
+}
+
+function applySmartMarkdownView(wasEmpty) {
+  if (!draft || draft.view !== 'edit') {
+    updateMarkdownPreview(true);
+    return;
+  }
+  if (readSavedEditorView() === 'edit') return; // Respeita escolha manual de ficar só no texto
+  if (canSplitEditor()) setEditorView('split', { focus: false, remember: false });
+  else if (wasEmpty) setEditorView('preview', { focus: false, remember: false });
+}
+
+function applySnapshotReplacement(snap, doneMsg, expandIfStrong = false) {
+  const ta = $('#ta');
+  if (!ta || !draft || pasteActionSnapshot !== snap) return;
+  if (ta.value.slice(snap.start, snap.end) !== snap.expected) {
+    toast('O texto já foi alterado; use Ctrl+Z para desfazer.');
+    pasteActionSnapshot = null;
+    return;
+  }
+  pasteActionSnapshot = null;
+  insertAt(ta, snap.replacement, snap.start, snap.end);
+  syncEditor({ immediate: true });
+  if (expandIfStrong && detectMarkdown(snap.replacement).isStrong) {
+    applySmartMarkdownView(snap.wasEmpty);
+  }
+  toast(doneMsg, I.check);
+}
+
+function handleEditorPaste(e) {
+  const ta = $('#ta');
+  if (!ta || !draft || !e.clipboardData) return;
+
+  // Respeita Ctrl/⌘+Shift+V e Cmd+Option+Shift+V (macOS) com janela temporal efêmera
+  const forcePlain = performance.now() <= plainPasteUntil;
+  plainPasteUntil = 0;
+  pasteActionSnapshot = null;
+  if (forcePlain) return;
+
+  const plain = e.clipboardData.getData('text/plain') || '';
+  const normPlain = plain.replace(/\r\n?/g, '\n'); // Compatível com \r\n no Windows
+  const html = e.clipboardData.getData('text/html') || '';
+  const wasEmpty = !ta.value.trim();
+
+  // Nível 1: text/plain já contém Markdown → preserva colagem nativa; só expande view se isStrong
+  const pastedMd = detectMarkdown(normPlain);
+  if (pastedMd.isMarkdown) {
+    if (pastedMd.isStrong) {
+      requestAnimationFrame(() => {
+        if (!draft) return;
+        applySmartMarkdownView(wasEmpty);
+        toast('Formatação Markdown identificada', I.check);
+      });
+    }
+    return;
+  }
+
+  if (!html) return;
+  const htmlKind = classifyHtmlPaste(html);
+  if (htmlKind === 'none') return;
+
+  const converted = htmlToMarkdown(html);
+  const convertedMd = detectMarkdown(converted);
+  if (!converted || converted === normPlain.trim() || !convertedMd.isMarkdown) return;
+
+  // Nível 2: HTML com estrutura de bloco (títulos, listas, tabelas, código, citações) → converte + Desfazer
+  if (htmlKind === 'block') {
+    e.preventDefault();
+    const start = ta.selectionStart;
+    insertAt(ta, converted, start, ta.selectionEnd);
+    syncEditor({ immediate: true });
+    if (convertedMd.isStrong) applySmartMarkdownView(wasEmpty);
+
+    const snap = {
+      start,
+      end: start + converted.length,
+      expected: converted,
+      replacement: normPlain,
+      wasEmpty
+    };
+    pasteActionSnapshot = snap;
+    toast('Formatação convertida para Markdown', I.check, {
+      duration: 6000,
+      action: {
+        label: 'Desfazer',
+        onClick: () => applySnapshotReplacement(snap, 'Colagem revertida para texto simples')
+      }
+    });
+    return;
+  }
+
+  // Nível 3: HTML apenas com marcação inline (Word/PJe) → cola texto limpo + oferta opt-in
+  if (htmlKind === 'inline') {
+    const start = ta.selectionStart;
+    requestAnimationFrame(() => {
+      if (!ta || !draft) return;
+      if (ta.value.slice(start, start + normPlain.length) !== normPlain) return;
+      const snap = {
+        start,
+        end: start + normPlain.length,
+        expected: normPlain,
+        replacement: converted,
+        wasEmpty
+      };
+      pasteActionSnapshot = snap;
+      toast('Texto colado sem formatação', '', {
+        duration: 6000,
+        action: {
+          label: 'Converter formatação',
+          onClick: () => applySnapshotReplacement(snap, 'Formatação convertida para Markdown', true)
+        }
+      });
+    });
+  }
+}
+
 function openEditor(id, recovered = null, defaultParentId = null){
   if(!state.user){ openPop(); toast('Entre para criar modelos.'); return; }
   const m = id ? state.models.find(x => x.id === id) : null;
@@ -860,6 +1055,8 @@ function openEditor(id, recovered = null, defaultParentId = null){
 
   const eligibleParents = mains.filter(x => x.id !== id);
 
+  lastChipsSig = null;
+  pasteActionSnapshot = null;
   draft = {
     id: recovered?.id || m?.id || newPromptId(state.user.uid),
     name: src?.name || '',
@@ -869,6 +1066,7 @@ function openEditor(id, recovered = null, defaultParentId = null){
     order: m ? m.order : null,
     subOrderIds: currentSubOrderIds,
     _initialSubOrderIds: initialSubOrderIds,
+    view: 'edit',
     isNew,
     saving: false,
     orig
@@ -906,11 +1104,24 @@ function openEditor(id, recovered = null, defaultParentId = null){
     <div class="field-row" id="subOrderBox" hidden></div>
     <div class="field-row">
       <span class="lbl">Texto do prompt</span>
-      <div class="editor">
-        <div class="tools" id="tools">${toolsIdle}</div>
-        <div class="wrap">
-          <div class="backdrop" id="bd" aria-hidden="true"></div>
-          <textarea class="ta" id="ta" spellcheck="false" placeholder="Cole o texto do prompt. Use “Inserir campo” para marcar onde entra o seu texto livre."></textarea>
+      <div class="editor" id="editorBox" data-view="edit">
+        <div class="tools" id="tools">
+          <div class="tools-left" id="toolsField">${toolsIdle}</div>
+          <div class="tools-right" id="toolsMd">
+            <span class="md-pill" id="mdBadge" hidden>Markdown</span>
+            <div class="seg" role="group" aria-label="Modo de visualização do editor">
+              <button type="button" class="seg-btn" data-ed-view="edit" aria-pressed="true">Editar</button>
+              <button type="button" class="seg-btn seg-split" data-ed-view="split" aria-pressed="false">Dividido</button>
+              <button type="button" class="seg-btn" data-ed-view="preview" aria-pressed="false">Formatado</button>
+            </div>
+          </div>
+        </div>
+        <div class="editor-panes">
+          <div class="wrap" id="editPane">
+            <div class="backdrop" id="bd" aria-hidden="true"></div>
+            <textarea class="ta" id="ta" spellcheck="false" placeholder="Cole o texto do prompt (Markdown é reconhecido automaticamente). Use “Inserir campo” para marcar variáveis."></textarea>
+          </div>
+          <div class="md-preview" id="mdPreview" role="region" aria-label="Pré-visualização formatada em Markdown" aria-live="off" hidden></div>
         </div>
       </div>
       <div class="chips" id="chips"></div>
@@ -931,36 +1142,108 @@ function openEditor(id, recovered = null, defaultParentId = null){
     updateReparentNote();
     renderDraftSubOrderList();
   });
-  ta.addEventListener('input', syncEditor);
-  ta.addEventListener('scroll', () => { const bd = $('#bd'); if (bd) bd.scrollTop = ta.scrollTop; });
-  bindAddFieldBtn();
 
-  syncEditor();
+  ta.addEventListener('input', () => {
+    if (
+      pasteActionSnapshot &&
+      ta.value.slice(pasteActionSnapshot.start, pasteActionSnapshot.end) !== pasteActionSnapshot.expected
+    ) {
+      pasteActionSnapshot = null;
+    }
+    syncEditor();
+  });
+
+  ta.addEventListener('keydown', e => {
+    const isV = e.code === 'KeyV' || (e.key || '').toLowerCase() === 'v';
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && isV) {
+      plainPasteUntil = performance.now() + 300;
+    }
+  });
+
+  ta.addEventListener('paste', handleEditorPaste);
+
+  ta.addEventListener('scroll', () => {
+    const bd = $('#bd');
+    if (bd) bd.scrollTop = ta.scrollTop;
+    if (draft?.view === 'split') {
+      cancelAnimationFrame(scrollRaf);
+      scrollRaf = requestAnimationFrame(() => {
+        const pv = $('#mdPreview');
+        const maxTa = ta.scrollHeight - ta.clientHeight;
+        if (pv && maxTa > 0) {
+          pv.scrollTop = (ta.scrollTop / maxTa) * (pv.scrollHeight - pv.clientHeight);
+        }
+      });
+    }
+  });
+
+  document.querySelectorAll('[data-ed-view]').forEach(btn => {
+    btn.addEventListener('click', () => setEditorView(btn.dataset.edView));
+  });
+
+  bindAddFieldBtn();
+  syncEditor({ immediate: true });
   updateReparentNote();
   renderDraftSubOrderList();
-  renderDock();
-  if (!matchMedia('(hover:none)').matches) (isNew ? nameIn : ta).focus({ preventScroll: true });
-}
 
-function backdropHtml(text) {
-  let html = '', last = 0;
-  for (const mt of text.matchAll(FIELD_RE)) {
-    html += esc(text.slice(last, mt.index)) + `<mark>${esc(mt[0])}</mark>`;
-    last = mt.index + mt[0].length;
+  // Abertura inicial: só ativa modo dividido automaticamente quando detecção for forte (isStrong)
+  const initialMd = detectMarkdown(draft.body);
+  const savedView = readSavedEditorView();
+  let startView = 'edit';
+  if (initialMd.isStrong) {
+    startView = savedView || (canSplitEditor() ? 'split' : 'edit');
   }
-  return html + esc(text.slice(last)) + '\n';
+  setEditorView(startView, { focus: false, remember: false });
+
+  renderDock();
+  // Preserva integralmente o foco original (Nome em modelos novos, textarea em edições)
+  if (!matchMedia('(hover:none)').matches) {
+    (isNew ? nameIn : (draft.view === 'preview' ? nameIn : ta)).focus({ preventScroll: true });
+  }
 }
 
-function syncEditor() {
+function syncEditor({ immediate = false } = {}) {
   const ta = $('#ta');
   if (!ta || !draft) return;
+
+  // Fase 1 (Síncrona): mantém draft.body e dirty() sempre exatos antes de qualquer atalho/saída
   draft.body = ta.value;
-  const bd = $('#bd');
-  bd.innerHTML = backdropHtml(ta.value);
-  bd.scrollTop = ta.scrollTop;
-  const f = fieldsOf(ta.value);
-  $('#chips').innerHTML = f.map(x => `<span class="chip">${esc(x)}</span>`).join('');
-  $('#meta').textContent = f.length ? `${f.length} ${f.length === 1 ? 'campo' : 'campos'}` : 'Sem campos variáveis';
+
+  // Fase 2 (Unificada em rAF — roda antes da pintura do mesmo quadro no input)
+  const runPaint = () => {
+    if (!draft) return;
+
+    const bd = $('#bd');
+    if (bd) {
+      bd.innerHTML = highlightMarkdownBackdrop(draft.body, FIELD_RE);
+      bd.scrollTop = ta.scrollTop;
+    }
+
+    const mdInfo = detectMarkdown(draft.body);
+    const badge = $('#mdBadge');
+    if (badge) {
+      badge.hidden = !mdInfo.isMarkdown;
+      badge.title = mdInfo.isMarkdown
+        ? `Markdown detectado: ${mdInfo.features.join(', ')}`
+        : '';
+    }
+
+    const f = fieldsOf(draft.body);
+    const sig = f.join('\u0000');
+    if (sig !== lastChipsSig) {
+      lastChipsSig = sig;
+      const chipsEl = $('#chips');
+      if (chipsEl) chipsEl.innerHTML = f.map(x => `<span class="chip">${esc(x)}</span>`).join('');
+      const metaEl = $('#meta');
+      if (metaEl) metaEl.textContent = f.length ? `${f.length} ${f.length === 1 ? 'campo' : 'campos'}` : 'Sem campos variáveis';
+    }
+
+    updateMarkdownPreview(immediate === true);
+  };
+
+  cancelAnimationFrame(syncRaf);
+  if (immediate === true) runPaint();
+  else syncRaf = requestAnimationFrame(runPaint);
 }
 
 function updateReparentNote() {
@@ -976,7 +1259,8 @@ function updateReparentNote() {
 }
 
 function askFieldName() {
-  const ta = $('#ta'), tools = $('#tools');
+  if (draft?.view === 'preview') setEditorView(canSplitEditor() ? 'split' : 'edit', { remember: false });
+  const ta = $('#ta'), tools = $('#toolsField');
   if (!ta || !tools) return;
   const len = ta.value.length;
   const r = { s: Math.min(savedRange.s, len), e: Math.min(savedRange.e, len) };
@@ -997,7 +1281,7 @@ function askFieldName() {
     if (!name) { toast('Dê um nome ao campo.'); input.focus(); return; }
     close();
     insertAt(ta, `{{${name}}}`, r.s, useSel ? r.e : r.s);
-    syncEditor();
+    syncEditor({ immediate: true });
   };
   $('#fOk').addEventListener('click', confirm);
   $('#fNo').addEventListener('click', cancel);
@@ -1241,13 +1525,28 @@ $('#dock').addEventListener('click', e => {
 
 /* ---------- Toast e Atalhos Globais ---------- */
 let toastTimer = null;
-function toast(msg, icon = '') {
+function toast(msg, icon = '', opts = {}) {
   const el = $('#toast');
   if (!el) return;
-  el.innerHTML = `${icon}<span>${esc(msg)}</span>`;
+  const { action = null, duration = 2600 } = opts;
+
+  el.innerHTML = `${icon}<span>${esc(msg)}</span>` +
+    (action ? `<button type="button" class="toast-act" id="toastAct">${esc(action.label)}</button>` : '');
+  el.classList.toggle('has-action', Boolean(action));
   el.classList.add('show');
+
+  if (action) {
+    $('#toastAct')?.addEventListener('click', () => {
+      clearTimeout(toastTimer);
+      el.classList.remove('show', 'has-action');
+      action.onClick();
+    }, { once: true });
+  }
+
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 2600);
+  toastTimer = setTimeout(() => {
+    el.classList.remove('show', 'has-action');
+  }, duration);
 }
 
 document.addEventListener('keydown', e => {
