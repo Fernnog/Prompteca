@@ -300,6 +300,7 @@ svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:
 .peek[open] summary::after{content:"Ocultar"}
 .peek .doc{padding:14px 16px;font-size:13px}
 .peek .doc mark{background:var(--slot);color:var(--slot-fg);padding:1px 5px;border-radius:4px;border:1px solid var(--slot-line)}
+.peek .md-preview{min-height:0;padding:14px 16px;font-size:13.5px}
 
 /* Edição e Reordenação de Subprompts */
 .field-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
@@ -543,7 +544,8 @@ svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:
   background:var(--slot);color:var(--slot-fg);border:1px solid var(--slot-line);
   border-radius:5px;padding:0 5px;font:500 .92em/1.4 var(--mono);white-space:nowrap;
 }
-.md-preview .md-var-filled{white-space:normal}
+/* Preserva quebras de linha quando o campo preenchido tem mais de um parágrafo */
+.md-preview .md-var-filled{white-space:pre-wrap}
 .md-preview .md-empty{color:var(--muted);font-style:italic;margin:0}
 
 /* Toast interativo com quebra graciosa em celulares estreitos (360px) */

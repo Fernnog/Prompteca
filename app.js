@@ -713,7 +713,12 @@ $('#q').addEventListener('input', e => {
 /* ---------- Painel Modal Sob Demanda (Visualização/Preenchimento e Editor) ---------- */
 const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 
-function formatPeekHtml(body, vals){
+let peekTimer = null;
+
+function formatPeekHtml(body, vals, useMarkdown = false){
+  if (useMarkdown) {
+    return renderMarkdown(body, { fieldRe: FIELD_RE, values: vals });
+  }
   let html = '', last = 0;
   for (const mt of body.matchAll(FIELD_RE)){
     html += esc(body.slice(last, mt.index));
@@ -725,6 +730,7 @@ function formatPeekHtml(body, vals){
 }
 
 function renderMain(){
+  clearTimeout(peekTimer);
   syncPanelVisibility();
   const body = $('#body');
   const m = state.models.find(x => x.id === state.current);
@@ -734,6 +740,7 @@ function renderMain(){
     const pid = effParentId(m);
     const parentModel = pid ? byId.get(pid) : null;
     const fields = m._fields || fieldsOf(m.body);
+    const hasMd = detectMarkdown(m.body).isMarkdown;
 
     $('#title').textContent = m.name;
     $('#meta').textContent = fields.length
@@ -766,18 +773,31 @@ function renderMain(){
       ${slotsHtml}
       <details class="peek" id="peekBox" ${isPeekOpen ? 'open' : ''}>
         <summary>Ver texto do prompt</summary>
-        <div class="doc" id="peekDoc">${isPeekOpen ? formatPeekHtml(m.body, vals) : ''}</div>
+        <div class="${hasMd ? 'md-preview' : 'doc'}" id="peekDoc" aria-live="off">${isPeekOpen ? formatPeekHtml(m.body, vals, hasMd) : ''}</div>
       </details>
     </div>`;
+
+    const refreshPeek = (immediate = false) => {
+      const peekBox = $('#peekBox');
+      const peekDoc = $('#peekDoc');
+      if (!peekBox?.open || !peekDoc) return;
+      const paint = () => {
+        if ($('#peekBox')?.open && $('#peekDoc')) {
+          $('#peekDoc').innerHTML = formatPeekHtml(m.body, vals, hasMd);
+        }
+      };
+      clearTimeout(peekTimer);
+      // Debounce leve apenas em prompts extensos para manter a digitação nos campos fluida
+      if (immediate || !hasMd || m.body.length < 4000) paint();
+      else peekTimer = setTimeout(paint, 120);
+    };
 
     body.querySelectorAll('.slot textarea').forEach(ta => {
       grow(ta);
       ta.addEventListener('input', () => {
         vals[ta.dataset.f] = ta.value;
         grow(ta);
-        if ($('#peekBox')?.open && $('#peekDoc')) {
-          $('#peekDoc').innerHTML = formatPeekHtml(m.body, vals);
-        }
+        refreshPeek();
       });
     });
 
@@ -802,12 +822,9 @@ function renderMain(){
     });
 
     const peekBox = $('#peekBox');
-    const peekDoc = $('#peekDoc');
     peekBox?.addEventListener('toggle', () => {
       ui.peekOpenById[m.id] = peekBox.open;
-      if (peekBox.open && peekDoc) {
-        peekDoc.innerHTML = formatPeekHtml(m.body, vals);
-      }
+      if (peekBox.open) refreshPeek(true);
     });
   }
   renderDock();
