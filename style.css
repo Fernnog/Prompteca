@@ -567,3 +567,94 @@ svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:
   .seg-split{display:none}
 }
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+/* ---------- Contenção de scroll nos containers reais ---------- */
+.list,.panel-body{overscroll-behavior:contain}
+
+/* ---------- Splash Screen Temática (Contínua com a Splash Nativa) ---------- */
+.splash{
+  position:fixed;inset:0;z-index:100;
+  display:grid;place-items:center;
+  background:var(--bg);
+  transition:opacity .28s ease,transform .28s ease,visibility .28s ease;
+}
+.splash.is-hidden{
+  opacity:0;visibility:hidden;pointer-events:none;
+  transform:scale(1.015);
+}
+.splash-card{
+  display:flex;flex-direction:column;align-items:center;gap:14px;
+  padding:24px;
+}
+.splash-logo{
+  width:84px;height:84px;border-radius:22px;
+  display:grid;place-items:center;
+  background:var(--surface);
+  border:1px solid color-mix(in srgb,var(--accent) 26%,var(--line));
+  box-shadow:0 12px 28px -14px var(--accent-glow),var(--shadow-sm);
+  overflow:hidden;
+}
+.splash-logo img{width:64px;height:64px;border-radius:14px;display:block}
+.splash-title{
+  font-size:18px;font-weight:600;letter-spacing:-.02em;color:var(--fg);
+}
+/* Só aparece após 300ms para não piscar em aberturas rápidas do cache */
+.splash-bar{
+  width:108px;height:3px;border-radius:999px;overflow:hidden;
+  background:color-mix(in srgb,var(--line) 85%,transparent);
+  position:relative;opacity:0;
+  animation:splashBarReveal .2s ease .3s forwards;
+}
+.splash-bar span{
+  position:absolute;inset:0 auto 0 0;width:44%;border-radius:999px;
+  background:var(--accent-grad);
+  animation:splashLoad 1.15s ease-in-out .3s infinite;
+}
+@keyframes splashBarReveal{to{opacity:1}}
+@keyframes splashLoad{
+  0%{transform:translateX(-110%)}
+  100%{transform:translateX(260%)}
+}
+
+/* ---------- Instalação PWA: Faixa Dispensável + Opção no Popover da Conta ---------- */
+.install-bar{
+  display:flex;align-items:center;gap:8px;
+  padding:7px 8px 7px 12px;border-radius:10px;
+  background:var(--accent-soft);
+  border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);
+  font-size:12.5px;color:var(--fg);
+}
+.install-bar-txt{flex:1;min-width:0;line-height:1.3}
+.install-bar-go{
+  padding:5px 10px;border-radius:7px;font-size:12px;font-weight:600;flex:none;
+  background:var(--accent-grad);color:var(--on-accent);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.2);
+  transition:filter .15s,transform .15s;
+}
+.install-bar-go:hover{filter:brightness(1.07)}
+.install-bar-go:active{transform:scale(.97)}
+.install-bar-go:disabled{opacity:.6;pointer-events:none}
+.install-bar-close{width:26px;height:26px;flex:none}
+
+.pop-pwa{
+  margin-top:10px;padding-top:10px;border-top:1px solid var(--line);
+}
+.install-pop-btn{
+  display:flex;align-items:center;justify-content:center;gap:8px;width:100%;
+  padding:8px 10px;border-radius:9px;font-size:13px;font-weight:500;
+  background:var(--accent-soft);color:var(--accent);
+  border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);
+  transition:border-color .15s,filter .15s;
+}
+.install-pop-btn:hover{border-color:var(--accent);filter:brightness(1.04)}
+.install-pop-btn:disabled{opacity:.6;pointer-events:none}
+.install-pop-btn svg{width:15px;height:15px}
+
+/* ---------- Safe-Area por Breakpoint e Ocultação Preventiva no Modo Standalone ---------- */
+body{padding-top:max(16px,env(safe-area-inset-top,0px))}
+@media (hover:none),(max-width:680px){
+  body{padding-top:max(10px,env(safe-area-inset-top,0px))}
+}
+@media (display-mode:standalone){
+  .install-only{display:none!important}
+}

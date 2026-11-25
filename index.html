@@ -14,9 +14,21 @@
 <link rel="icon" type="image/png" sizes="512x512" href="image/android-chrome-512x512.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
-<link rel="stylesheet" href="style.css?v=4">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="style.css?v=5">
+<script defer src="pwa.js?v=1"></script>
 </head>
 <body>
+<div class="splash" id="splash" role="status" aria-label="Carregando Prompteca">
+  <div class="splash-card">
+    <div class="splash-logo">
+      <img src="image/android-chrome-192x192.png" alt="" width="64" height="64">
+    </div>
+    <strong class="splash-title">Prompteca</strong>
+    <div class="splash-bar" aria-hidden="true"><span></span></div>
+  </div>
+</div>
+<script>setTimeout(function(){var s=document.getElementById('splash');if(s)s.remove();},6000);</script>
 <div class="app" id="appRoot" data-panel-open="false">
   <main class="side" id="side" aria-label="Modelos salvos">
     <div class="side-head">
@@ -54,6 +66,12 @@
                   <svg viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H4"/></svg>Sair
                 </button>
               </div>
+              <div class="pop-pwa install-only" id="installPopWrap" hidden>
+                <button class="install-pop-btn" id="installPopBtn" type="button">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+                  <span>Instalar aplicativo</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -62,6 +80,13 @@
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <input id="q" type="search" placeholder="Buscar modelo ou subprompt por nome ou conteúdo…" autocomplete="off">
       </label>
+      <div class="install-bar install-only" id="installBar" role="region" aria-label="Instalação do aplicativo" hidden>
+        <span class="install-bar-txt">Salvar Prompteca na tela inicial como app</span>
+        <button class="install-bar-go" id="installBarBtn" type="button">Instalar</button>
+        <button class="ib install-bar-close" id="installBarDismiss" type="button" aria-label="Dispensar aviso de instalação" title="Dispensar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
     </div>
     <ul class="list" id="list"></ul>
     <div class="status" id="status" hidden></div>
@@ -83,6 +108,6 @@
 </div>
 <div class="scrim" id="scrim"></div>
 
-<script type="module" src="app.js?v=4"></script>
+<script type="module" src="app.js?v=5"></script>
 </body>
 </html>

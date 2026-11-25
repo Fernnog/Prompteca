@@ -226,9 +226,11 @@ watchAuth(user=>{
       const msg = saveMessage(err);
       showStatus(msg); toast(msg);
       state.loaded=true; renderList(); renderMain();
+      window.PromptecaSplash?.dismiss();
     });
   } else {
     state.loaded=true; showStatus('');
+    window.PromptecaSplash?.dismiss();
   }
   renderList(); renderMain();
 });
@@ -290,6 +292,7 @@ function setModels(arr){
   state.models = arr.map(enrichModel);
   const wasLoaded = state.loaded;
   state.loaded = true;
+  window.PromptecaSplash?.dismiss();
 
   if(state.current && !state.models.find(m => m.id === state.current) && state.mode !== 'edit'){
     state.current = null;
