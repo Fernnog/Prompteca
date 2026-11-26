@@ -15,8 +15,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="style.css?v=5">
-<script defer src="pwa.js?v=1"></script>
+<link rel="stylesheet" href="style.css?v=6">
+<script defer src="pwa.js?v=2"></script>
 </head>
 <body>
 <div class="splash" id="splash" role="status" aria-label="Carregando Prompteca">
@@ -67,10 +67,11 @@
                 </button>
               </div>
               <div class="pop-pwa install-only" id="installPopWrap" hidden>
-                <button class="install-pop-btn" id="installPopBtn" type="button">
+                <button class="install-pop-btn" id="installPopBtn" type="button" hidden>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
                   <span>Instalar aplicativo</span>
                 </button>
+                <p class="install-hint" id="installHint" hidden></p>
               </div>
             </div>
           </div>

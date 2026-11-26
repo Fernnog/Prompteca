@@ -1,7 +1,8 @@
 // Service Worker do Prompteca — Isolado por prefixo/escopo e compatível com Firestore Offline.
 const CACHE_PREFIX = 'prompteca-';
-const CACHE_NAME = CACHE_PREFIX + 'shell-v1';
+const CACHE_NAME = CACHE_PREFIX + 'shell-v2';
 const NAV_TIMEOUT_MS = 2800;
+const MANIFEST_TIMEOUT_MS = 3000;
 
 // Constante única para o host do SDK do Firebase (evita duplicação e facilita conferência)
 const FIREBASE_CDN_HOST = 'www.gstatic.com';
@@ -16,7 +17,9 @@ const CORE_PRECACHE = [
   './image/favicon-16x16.png',
   './image/apple-touch-icon.png',
   './image/android-chrome-192x192.png',
-  './image/android-chrome-512x512.png'
+  './image/android-chrome-512x512.png',
+  // Opcional: se o arquivo ainda não existir (Opção B), o Promise.allSettled do install ignora o 404
+  './image/android-chrome-maskable-512x512.png'
 ];
 
 const getSwPathname = () => new URL('sw.js', self.registration.scope).pathname;
@@ -26,6 +29,8 @@ const matchOwnCache = req => caches.match(req, { cacheName: CACHE_NAME });
 // Restringe same-origin ao escopo exato do Prompteca e nunca intercepta Firestore nem Auth.
 function isCacheableUrl(url) {
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+  // Requisições de diagnóstico (?_diag=...) vão direto à rede: nunca leem nem gravam no cache
+  if (url.searchParams.has('_diag')) return false;
   if (url.origin === self.location.origin) {
     return url.href.startsWith(self.registration.scope) && url.pathname !== getSwPathname();
   }
@@ -38,6 +43,10 @@ function isImmutableUrl(url) {
   if (url.origin === self.location.origin && url.searchParams.has('v')) return true;
   if (url.hostname === FIREBASE_CDN_HOST && url.pathname.startsWith('/firebasejs/')) return true;
   return false;
+}
+
+function isManifestUrl(url) {
+  return url.origin === self.location.origin && url.pathname.endsWith('/manifest.webmanifest');
 }
 
 async function putInCache(reqOrUrl, response, pruneVersioned) {
@@ -176,6 +185,31 @@ function respondStaleWhileRevalidate(event) {
   );
 }
 
+// Network-First resiliente para o manifesto: rede quando ok; cache em erro HTTP, falha de rede
+// ou rede lenta (timeout); Response.error() apenas se não houver rede nem cópia local.
+function respondNetworkFirst(event) {
+  const netPromise = fetch(event.request, { cache: 'no-cache' });
+
+  const cacheWrite = netPromise
+    .then(res => (res && res.ok ? putInCache(event.request, res.clone(), false) : null))
+    .catch(() => {});
+
+  event.waitUntil(cacheWrite);
+
+  event.respondWith((async () => {
+    const cached = await matchOwnCache(event.request);
+
+    const network = netPromise
+      .then(res => (res && res.ok ? res : (cached || res)))
+      .catch(() => cached || Response.error());
+
+    if (!cached) return network;
+
+    const timeoutFallback = new Promise(resolve => setTimeout(() => resolve(cached), MANIFEST_TIMEOUT_MS));
+    return Promise.race([network, timeoutFallback]);
+  })());
+}
+
 self.addEventListener('fetch', event => {
   const req = event.request;
   if (req.method !== 'GET') return;
@@ -185,6 +219,11 @@ self.addEventListener('fetch', event => {
 
   if (req.mode === 'navigate') {
     respondNavigation(event);
+    return;
+  }
+
+  if (isManifestUrl(url)) {
+    respondNetworkFirst(event);
     return;
   }
 

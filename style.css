@@ -649,6 +649,12 @@ svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:
 .install-pop-btn:hover{border-color:var(--accent);filter:brightness(1.04)}
 .install-pop-btn:disabled{opacity:.6;pointer-events:none}
 .install-pop-btn svg{width:15px;height:15px}
+/* Orientação manual de instalação (sem beforeinstallprompt, navegador embutido ou HTTP) */
+.install-hint{
+  margin:0;padding:8px 10px;border-radius:9px;
+  background:var(--surface-2);border:1px solid var(--line);
+  color:var(--muted);font-size:12px;line-height:1.45;
+}
 
 /* ---------- Safe-Area por Breakpoint e Ocultação Preventiva no Modo Standalone ---------- */
 body{padding-top:max(16px,env(safe-area-inset-top,0px))}
