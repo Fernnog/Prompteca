@@ -1,15 +1,32 @@
-// Infraestrutura desacoplada de Splash Screen, Instalação PWA, Diagnóstico e Service Worker.
+// Infraestrutura desacoplada de Splash Screen, Instalação PWA, Diagnóstico, Service Worker e aviso de atualização.
 // Carregado como script clássico (defer) sem dependências externas ou do Firebase.
 (function () {
   'use strict';
 
   var DISMISS_KEY = 'prompteca_install_dismissed';
+  var DEBUG = new URLSearchParams(location.search).has('pwa-debug');
   var splashStart = performance.now();
   var splashClosed = false;
   var deferredPrompt = null;
 
   var isStandalone = function () {
     return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  };
+
+  // Desfaz a paleta fixa da splash (classe splash-active + theme-color), definida no <head> do index.html
+  var endSplashChrome = function () {
+    if (typeof window.__promptecaEndSplash === 'function') window.__promptecaEndSplash();
+    else document.documentElement.classList.remove('splash-active');
+  };
+
+  // Momento real em que a splash HTML ficou visível (FCP); lido na hora, sem depender de callback assíncrono
+  var getFcpTime = function () {
+    try {
+      var entry = performance.getEntriesByName('first-contentful-paint')[0];
+      return entry ? entry.startTime : null;
+    } catch (_) {
+      return null;
+    }
   };
 
   /* ---------- 1. Controle da Splash Screen ---------- */
@@ -19,14 +36,34 @@
     clearTimeout(failsafeTimer);
 
     var el = document.getElementById('splash');
-    if (!el) return;
+    if (!el) {
+      endSplashChrome();
+      return;
+    }
 
     var reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    // No app instalado (standalone), o Android já exibiu a splash nativa: saída imediata
-    var minShowMs = (immediate || reduced || isStandalone()) ? 0 : 300;
-    var delay = Math.max(0, minShowMs - (performance.now() - splashStart));
+    var standalone = isStandalone();
+    // App instalado: nenhuma espera artificial (a splash nativa já cobriu a abertura).
+    // Navegador: mínimo de 300 ms de exposição real, contado a partir do FCP, para não piscar.
+    var minShowMs = (immediate || reduced || standalone) ? 0 : 300;
+    var fcp = getFcpTime();
+    var visibleOrigin = fcp !== null ? fcp : splashStart;
+    var now = performance.now();
+    var delay = Math.max(0, minShowMs - (now - visibleOrigin));
 
-    setTimeout(function () {
+    if (DEBUG) {
+      console.info('[Prompteca Splash]', {
+        standalone: standalone,
+        fcpMs: fcp !== null ? Math.round(fcp) : null,
+        dismissMs: Math.round(now),
+        visibleMs: Math.round(Math.max(0, now - visibleOrigin)),
+        appliedDelayMs: Math.round(delay)
+      });
+    }
+
+    var hide = function () {
+      // Restaura o tema real imediatamente antes do fade revelar o app
+      endSplashChrome();
       el.classList.add('is-hidden');
       el.setAttribute('aria-hidden', 'true');
       if (reduced) {
@@ -35,7 +72,18 @@
       }
       el.addEventListener('transitionend', function () { el.remove(); }, { once: true });
       setTimeout(function () { if (el.isConnected) el.remove(); }, 400);
-    }, delay);
+    };
+
+    if (delay > 0) {
+      setTimeout(hide, delay);
+    } else if (reduced) {
+      hide();
+    } else {
+      // Dois quadros garantem que a transição de opacidade sempre ocorra, sem corte brusco
+      requestAnimationFrame(function () {
+        requestAnimationFrame(hide);
+      });
+    }
   }
 
   // Failsafe secundário (3,5 s), completamente independente do Firebase/app.js
@@ -205,7 +253,8 @@
     return issues;
   }
 
-  window.PromptecaPWA = { diagnose: diagnoseInstallability };
+  // updateAvailable permite que o app.js (módulo, executado depois) descubra um aviso já recebido
+  window.PromptecaPWA = { diagnose: diagnoseInstallability, updateAvailable: false };
 
   if (!isStandalone()) {
     // Dica manual no popover da conta até que beforeinstallprompt forneça o botão nativo
@@ -234,18 +283,32 @@
       deferredPrompt = null;
       hideAllInstallUI();
     });
-
-    if (new URLSearchParams(location.search).has('pwa-debug')) {
-      window.addEventListener('load', function () { diagnoseInstallability(); }, { once: true });
-    }
   }
 
-  /* ---------- 4. Registro do Service Worker e Pré-Cache Dinâmico Pós-Load ---------- */
+  if (DEBUG) {
+    window.addEventListener('load', function () { diagnoseInstallability(); }, { once: true });
+  }
+
+  /* ---------- 4. Service Worker: registro, pré-cache pós-load e aviso de nova versão ---------- */
   var canRegisterSW =
     'serviceWorker' in navigator &&
     (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1');
 
+  // Ponte SW → app.js: um único aviso por página, mesmo que chegue por push e por verificação ativa
+  function announceUpdate() {
+    if (window.PromptecaPWA.updateAvailable) return;
+    window.PromptecaPWA.updateAvailable = true;
+    window.dispatchEvent(new CustomEvent('prompteca:update'));
+  }
+
   if (canRegisterSW) {
+    navigator.serviceWorker.addEventListener('message', function (event) {
+      if (event.data && event.data.type === 'SHELL_UPDATED') announceUpdate();
+    });
+    if (typeof navigator.serviceWorker.startMessages === 'function') {
+      navigator.serviceWorker.startMessages();
+    }
+
     var pageLoaded = document.readyState === 'complete'
       ? Promise.resolve()
       : new Promise(function (resolve) { window.addEventListener('load', resolve, { once: true }); });
@@ -255,7 +318,14 @@
     }).then(function (results) {
       var reg = results[1];
       var worker = reg && reg.active;
-      if (!worker || !performance || typeof performance.getEntriesByType !== 'function') return;
+      if (!worker) return;
+
+      // Pergunta ao SW se esta aba abriu sobre um shell que já foi substituído
+      if (navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'CHECK_UPDATE' });
+      }
+
+      if (!performance || typeof performance.getEntriesByType !== 'function') return;
 
       // Coleta as URLs exatas carregadas nesta sessão (incluindo ?v=N, SDK do Firebase e fontes)
       var seen = Object.create(null);

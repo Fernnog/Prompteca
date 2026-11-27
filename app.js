@@ -60,6 +60,7 @@ let scrollRaf = 0;
 let lastChipsSig = null;
 let plainPasteUntil = 0;
 let pasteActionSnapshot = null;
+let updatePending = false; // Aviso de nova versão adiado porque havia um painel aberto
 
 function readSavedEditorView() {
   try {
@@ -831,6 +832,12 @@ function renderMain(){
     });
   }
   renderDock();
+
+  // Reapresenta o aviso de nova versão assim que o usuário volta à lista
+  if (updatePending && state.mode === 'list') {
+    updatePending = false;
+    setTimeout(offerUpdate, 2800);
+  }
 }
 
 function grow(ta){ ta.style.height='auto'; ta.style.height=ta.scrollHeight+'px'; }
@@ -1591,3 +1598,26 @@ document.addEventListener('keydown', e => {
 });
 
 window.addEventListener('beforeunload', e => { if (dirty()) { e.preventDefault(); e.returnValue = ''; } });
+
+/* ---------- Aviso de Nova Versão (ponte sw.js → pwa.js → app.js) ---------- */
+function offerUpdate() {
+  toast('Nova versão do Prompteca disponível', '', {
+    duration: 12000,
+    action: {
+      label: 'Atualizar',
+      onClick: () => {
+        // Nunca recarrega com painel aberto: preserva rascunhos e campos já preenchidos
+        if (state.mode !== 'list' || draft?.saving) {
+          updatePending = true;
+          toast('Feche o painel atual; o aviso de atualização voltará em seguida.');
+          return;
+        }
+        location.reload();
+      }
+    }
+  });
+}
+
+window.addEventListener('prompteca:update', offerUpdate);
+// Cobre o aviso recebido pelo pwa.js antes de este módulo ser executado
+if (window.PromptecaPWA?.updateAvailable) offerUpdate();

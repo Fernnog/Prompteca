@@ -1,4 +1,4 @@
-/* Prompteca v3.2 — Paleta bronze/dourado, grafite e off-white quente.
+/* Prompteca v3.3 —Paleta bronze/dourado, grafite e off-white quente.
    Layout: Lista centralizada como tela única + Modal sob demanda para edição/preenchimento. */
 :root{
   --bg:#f4f2ed; --surface:#ffffff; --surface-2:#f4f1ea; --line:#e5dfd3;
@@ -77,7 +77,7 @@ svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:
 }
 .brand-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .brand{display:flex;align-items:center;gap:10px;padding:0 2px}
-.brand img{width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:#f4f2ed;flex:none}
+.brand img{width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:var(--surface-2);flex:none}
 .brand span{font-weight:600;font-size:16px;letter-spacing:-.01em}
 .head-right{display:flex;align-items:center;gap:8px}
 .count-pill{
@@ -595,9 +595,13 @@ svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:
   overflow:hidden;
 }
 .splash-logo img{width:64px;height:64px;border-radius:14px;display:block}
+/* Entrada só por opacidade e com fill "backwards" (sem opacity:0 estático):
+   com redução de movimento, a regra global desliga a animação e o título aparece de imediato. */
 .splash-title{
   font-size:18px;font-weight:600;letter-spacing:-.02em;color:var(--fg);
+  animation:splashFadeIn .22s ease .06s backwards;
 }
+@keyframes splashFadeIn{from{opacity:0}to{opacity:1}}
 /* Só aparece após 300ms para não piscar em aberturas rápidas do cache */
 .splash-bar{
   width:108px;height:3px;border-radius:999px;overflow:hidden;
@@ -614,6 +618,20 @@ svg{width:18px;height:18px;flex:none;stroke:currentColor;fill:none;stroke-width:
 @keyframes splashLoad{
   0%{transform:translateX(-110%)}
   100%{transform:translateX(260%)}
+}
+
+/* App instalado: a splash HTML usa sempre a paleta clara (#f4f2ed = background_color do manifesto),
+   inclusive no modo escuro, para emendar com a splash nativa do Android sem corte seco.
+   A troca para o tema escuro acontece dentro do fade de saída. A classe splash-active é
+   aplicada no <head> e removida pelo pwa.js no início do fade. */
+html.is-standalone.splash-active{background:#f4f2ed}
+html.is-standalone .splash{
+  --bg:#f4f2ed; --surface:#ffffff; --line:#e5dfd3; --fg:#1f1e1c;
+  --accent:#8a6410;
+  --accent-grad:linear-gradient(180deg,#93700f 0%,#75530a 100%);
+  --accent-glow:rgba(138,100,16,.28);
+  --shadow-sm:0 1px 2px rgba(43,38,25,.06),0 4px 14px -8px rgba(43,38,25,.14);
+  color-scheme:light;
 }
 
 /* ---------- Instalação PWA: Faixa Dispensável + Opção no Popover da Conta ---------- */
